@@ -195,7 +195,7 @@ function renderAuth(mode = "login") {
 
 // ------------------------------------------------------------ shell
 function navItems() {
-  const nav = [["home", "Home", "⌂"], ["subjects", "Subjects", "▦"], ["calendar", "Calendar", "▤"], ["leaderboard", "Leaderboard", "🏆"], ["notes", "Notes", "✎"], ["checklist", "Checklist", "☑"], ["files", "Files", "⇪"]];
+  const nav = [["home", "Home", "⌂"], ["subjects", "Subjects", "▦"], ["calendar", "Calendar", "▤"], ["notes", "Notes", "✎"], ["checklist", "Checklist", "☑"], ["files", "Files", "⇪"]];
   if (prefs().showAssignments) nav.splice(5, 0, ["assignments", "Assignments", "✍"]);
   return nav;
 }
@@ -204,7 +204,7 @@ function shell(content) {
   const active = route === "subject" ? "subjects" : route;
   const initials = S.user.name.split(/\s+/).map((w) => w[0]).slice(0, 2).join("").toUpperCase();
   const badge = badgeCount();
-  const bottom = [["home", "Home", "⌂"], ["subjects", "Subjects", "▦"], ["calendar", "Calendar", "▤"], ["leaderboard", "Ranks", "🏆"], ["checklist", "Checklist", "☑"]];
+  const bottom = [["home", "Home", "⌂"], ["subjects", "Subjects", "▦"], ["calendar", "Calendar", "▤"], ["checklist", "Checklist", "☑"], ["files", "Files", "⇪"]];
   return `
   <header class="top"><div class="top-in">
     <a class="logo" href="#/home"><i>✓</i><span class="logo-t">Sem 7 Tracker</span></a>
@@ -214,7 +214,7 @@ function shell(content) {
     <div class="menu" id="more">
       <button class="btn ghost sm" id="moreBtn" aria-haspopup="true">More ▾</button>
       <div class="menu-pop" role="menu">
-        <a href="#/leaderboard">🏆 Leaderboard</a>
+        <a href="#/leaderboard"${route === "leaderboard" ? ' style="background:var(--surface-2)"' : ""}>🏆 Leaderboard</a>
         <a href="#/files">⇪ My files</a>
         <a href="#/notes">✎ Study notes</a>
         <a href="#/assignments">✍ Assignments${prefs().showAssignments ? "" : ' <span class="pill" style="margin-left:auto">optional</span>'}</a>
