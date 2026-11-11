@@ -1,0 +1,13 @@
+{
+  "name": "sem7-tracker",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "22.x"
+  },
+  "dependencies": {
+    "aws4fetch": "^1.0.20",
+    "esbuild": "^0.28.2",
+    "pg": "^8.23.1"
+  }
+}
