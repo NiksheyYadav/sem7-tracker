@@ -1080,7 +1080,7 @@ function pageAdmin() {
     Pick “Who is this for?” on each post — students only see what's meant for their section and group.</p>
   ${sup ? `<div class="card adm-team"><h3>🛡 Admins</h3>
     <p class="muted small" style="margin-top:-6px">Add a batchmate as an admin using their roll number. A section admin can post announcements, deadlines, assessments and class events for their own section, and reset passwords in it. Only you can manage admins, subjects, study notes and delete accounts.</p>
-    <form id="admF" class="adm-add"><label class="f"><span>Roll number</span><input class="in" name="roll_no" required inputmode="numeric" placeholder="e.g. 231302148"></label>
+    <form id="admF" class="adm-add"><label class="f"><span>Roll number</span><input class="in" name="roll_no" required inputmode="numeric" placeholder="e.g. 2313022XX"></label>
       <label class="f"><span>Admin for</span><select class="in" name="scope_section">${Object.entries(SECS()).map(([k, v]) => `<option value="${k}">Section ${k} — ${esc(v.name)}</option>`).join("")}<option value="ALL">Whole batch (co-admin)</option></select></label>
       <button class="btn primary">Add admin</button></form>
     <div class="list" style="margin-top:10px">
