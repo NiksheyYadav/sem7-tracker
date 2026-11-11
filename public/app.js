@@ -700,7 +700,7 @@ function pageAdmin() {
       <label class="f"><span>Note</span><input class="in" name="note" placeholder="Topic / format / faculty note"></label>
       <label class="tcheck" style="padding:4px 0"><input type="checkbox" name="notify" checked><span>Ping everyone's devices</span></label>
       <button class="btn primary">Save for batch</button> <span class="muted small">Empty date + note removes it.</span></form>
-      ${S.deadlines.length ? `<div class="list" style="margin-top:10px">${S.deadlines.slice().sort((a, b) => dOnly(a.due_date).localeCompare(dOnly(b.due_date))).map((d) => { const s = subjById(d.subject_id); return `<div class="li"><span class="dot" style="--c:${s?.color}"></span><div style="flex:1;min-width:0"><b>${esc(s?.short)} · ${KIND_LABEL[d.kind]}</b><div class="muted small">${d.due_date ? fmtDate(d.due_date) : "no date"}${d.note ? " — " + esc(d.note) : ""}</div></div><button class="btn sm danger" data-deldl="${d.subject_id}|${d.kind}">Remove</button></div>`; }).join("")}</div>` : ""}
+      ${S.deadlines.length ? `<div class="list" style="margin-top:10px">${S.deadlines.slice().sort((a, b) => dOnly(a.due_date).localeCompare(dOnly(b.due_date))).map((d) => { const s = subjById(d.subject_id); return `<div class="li"><span class="dot" style="--c:${s?.color}"></span><div style="flex:1;min-width:0"><b>${esc(s?.short)} · ${KIND_LABEL[d.kind]}</b><div class="muted small">${d.due_date ? fmtDate(d.due_date) : "no date"}${d.note ? " — " + esc(d.note) : ""}</div></div><button class="btn sm ghost" data-edit-dl="${d.subject_id}|${d.kind}">Edit</button> <button class="btn sm danger" data-deldl="${d.subject_id}|${d.kind}">✕</button></div>`; }).join("")}</div>` : ""}
     </div>
   </div>
   <div class="card" style="margin-top:14px"><h3>◷ Unit assessments (UA-1 / UA-2 / UA-3)</h3>
@@ -726,7 +726,8 @@ function pageAdmin() {
       <button class="btn primary">Reset</button></form></div>
   </div>
   <div class="card" style="margin-top:14px"><h3>👥 Accounts</h3><div id="usersBox"><button class="btn ghost" id="loadUsers">Load list</button></div></div>
-  <div class="card" style="margin-top:14px"><h3>✦ Posted updates</h3><div class="list">${S.updates.slice(0, 30).map((u) => `<div class="li"><div style="flex:1;min-width:0"><b>${u.version ? esc(u.version) + " · " : ""}${esc(u.title)}</b><div class="muted small">${u.kind} · ${fmtStamp(u.created_at)}</div></div><button class="btn sm danger" data-del-upd="${u.id}">✕</button></div>`).join("")}</div></div>`;
+  <div class="card" style="margin-top:14px"><h3>✦ Posted updates</h3><div class="list">${S.updates.slice(0, 30).map((u) => `<div class="li"><div style="flex:1;min-width:0"><b>${u.version ? esc(u.version) + " · " : ""}${esc(u.title)}</b><div class="muted small">${u.kind} · ${fmtStamp(u.created_at)}</div></div><button class="btn sm ghost" data-edit-upd="${u.id}">Edit</button> <button class="btn sm danger" data-del-upd="${u.id}">✕</button></div>`).join("")}</div></div>
+  <div class="card" style="margin-top:14px"><h3>📚 Subjects (shown to everyone)</h3><div class="list">${S.subjects.filter((s) => !s.owner_id).map((s) => `<div class="li"><span class="dot" style="--c:${s.color}"></span><div style="flex:1;min-width:0"><b>${esc(s.short)}</b> — ${esc(s.name)}<div class="muted small">${esc(s.code || "no code")}${s.credits ? " · " + s.credits + " credits" : ""} · ${s.kind}</div></div><button class="btn sm ghost" data-edit-sub="${s.id}">Edit</button></div>`).join("")}</div></div>`;
 }
 function examModal(e) {
   const subs = S.subjects.filter((s) => !s.owner_id);
@@ -750,6 +751,42 @@ function examModal(e) {
     try { const r = await api("PUT", `exam/${e.id}`, { ...fd, notify: !!fd.notify }); S.exams = S.exams.map((x) => (x.id === e.id ? r.exam : x)); close(); render(); toast("Saved"); }
     catch (err) { toast(err.message, true); }
   };
+}
+
+// generic edit modal: fields = [{name,label,value,type,options,rows}]
+function formModal(title, fields, onSave, extra = "") {
+  const bg = document.createElement("div");
+  bg.className = "modal-bg";
+  bg.innerHTML = `<form class="modal"><h3>${esc(title)}</h3>${fields.map((f) => `<label class="${f.type === "checkbox" ? "tcheck" : "f"}" ${f.type === "checkbox" ? 'style="padding:4px 0"' : ""}>
+    ${f.type === "checkbox" ? `<input type="checkbox" name="${f.name}" ${f.value ? "checked" : ""}><span>${esc(f.label)}</span>`
+      : `<span>${esc(f.label)}</span>${f.type === "select" ? `<select class="in" name="${f.name}">${f.options.map(([v, l]) => `<option value="${esc(v)}" ${String(v) === String(f.value) ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>`
+      : f.type === "textarea" ? `<textarea class="in" name="${f.name}" rows="${f.rows || 4}">${esc(f.value ?? "")}</textarea>`
+      : `<input class="in" name="${f.name}" type="${f.type || "text"}" value="${esc(f.value ?? "")}" ${f.required ? "required" : ""}>`}`}</label>`).join("")}
+    ${extra}<div class="row wrap" style="margin-top:6px"><button class="btn primary">Save</button><button type="button" class="btn ghost" data-close>Cancel</button></div></form>`;
+  document.body.appendChild(bg);
+  const close = () => bg.remove();
+  bg.onclick = (e) => { if (e.target === bg) close(); };
+  bg.querySelector("[data-close]").onclick = close;
+  bg.querySelector("form").onsubmit = async (e) => {
+    e.preventDefault();
+    const fd = Object.fromEntries(new FormData(e.target));
+    fields.filter((f) => f.type === "checkbox").forEach((f) => (fd[f.name] = !!fd[f.name]));
+    const btn = e.target.querySelector("button.primary"); btn.disabled = true;
+    try { await onSave(fd); close(); } catch (err) { btn.disabled = false; toast(err.message, true); }
+  };
+}
+function wireUsers() {
+  document.querySelectorAll("[data-edit-user]").forEach((b) => (b.onclick = () => {
+    const u = window._users.find((x) => x.roll_no === b.dataset.editUser);
+    formModal(`Edit account · ${u.roll_no}`, [{ name: "name", label: "Name", value: u.name, required: true }, { name: "section", label: "Section", value: u.section || "" }], async (fd) => {
+      await api("PUT", "admin/user", { roll_no: u.roll_no, ...fd }); toast("Account updated"); document.getElementById("loadUsers")?.click();
+    });
+  }));
+  document.querySelectorAll("[data-del-user]").forEach((b) => (b.onclick = async () => {
+    const roll = b.dataset.delUser, u = window._users.find((x) => x.roll_no === roll);
+    if (!confirm(`Delete the account ${roll} (${u?.name})? All their tracker data and files will be removed. This can't be undone.`)) return;
+    try { await api("POST", "admin/delete-user", { roll_no: roll }); toast("Account deleted"); window._users = window._users.filter((x) => x.roll_no !== roll); S.batchSize--; document.getElementById("loadUsers")?.click(); } catch (e) { toast(e.message, true); }
+  }));
 }
 
 // ------------------------------------------------------------ render & events
@@ -971,6 +1008,45 @@ function wirePage() {
     const [sid, kind] = el.dataset.deldl.split("|");
     try { await api("PUT", "deadline", { subject_id: Number(sid), kind }); S.deadlines = S.deadlines.filter((d) => !(d.subject_id === Number(sid) && d.kind === kind)); render(); } catch (e) { toast(e.message, true); }
   }));
+  on("[data-edit-dl]", (b) => (b.onclick = () => {
+    const [sid, kind] = b.dataset.editDl.split("|"), d = batchDL(Number(sid), kind);
+    formModal(`Edit batch deadline · ${subjById(sid)?.short} ${KIND_LABEL[kind]}`, [
+      { name: "due_date", label: "Due date", type: "date", value: dOnly(d?.due_date) },
+      { name: "note", label: "Note", value: d?.note || "" },
+      { name: "notify", label: "Ping everyone's devices about this change", type: "checkbox", value: false },
+    ], async (fd) => {
+      const r = await api("PUT", "deadline", { subject_id: Number(sid), kind, ...fd });
+      S.deadlines = S.deadlines.filter((x) => !(x.subject_id === Number(sid) && x.kind === kind));
+      if (r.deadline) S.deadlines.push(r.deadline);
+      await refreshUpdates(); render(); toast("Deadline updated");
+    });
+  }));
+  on("[data-edit-upd]", (b) => (b.onclick = () => {
+    const u = S.updates.find((x) => x.id === Number(b.dataset.editUpd));
+    formModal("Edit announcement / update", [
+      { name: "title", label: "Title", value: u.title, required: true },
+      { name: "kind", label: "Type", type: "select", value: u.kind, options: [["notice", "Notice"], ["release", "App update"], ["alert", "Alert"]] },
+      { name: "version", label: "Version", value: u.version || "" },
+      { name: "body", label: "Details", type: "textarea", value: u.body || "", rows: 5 },
+      { name: "notify", label: "Ping everyone's devices about this change", type: "checkbox", value: false },
+    ], async (fd) => {
+      const r = await api("PUT", `update/${u.id}`, fd);
+      S.updates = S.updates.map((x) => (x.id === u.id ? r.update : x)); render(); toast("Updated");
+    });
+  }));
+  on("[data-edit-sub]", (b) => (b.onclick = () => {
+    const s = subjById(b.dataset.editSub);
+    formModal(`Edit subject · ${s.short}`, [
+      { name: "name", label: "Full name", value: s.name, required: true },
+      { name: "short", label: "Short name", value: s.short },
+      { name: "code", label: "Course code", value: s.code || "" },
+      { name: "credits", label: "Credits", value: s.credits ?? "" },
+      { name: "color", label: "Colour", type: "color", value: s.color || "#6366f1" },
+    ], async (fd) => {
+      const r = await api("PUT", `subject/${s.id}`, fd);
+      S.subjects = S.subjects.map((x) => (x.id === s.id ? { ...x, ...r.subject } : x)); render(); toast("Subject updated");
+    });
+  }));
   const exF = document.getElementById("exF");
   if (exF) exF.onsubmit = async (e) => {
     e.preventDefault();
@@ -1001,7 +1077,11 @@ function wirePage() {
   if (lu) lu.onclick = async () => {
     try {
       const r = await api("GET", "admin/users");
-      document.getElementById("usersBox").innerHTML = `<div class="scroll"><table class="t"><thead><tr><th>Roll</th><th>Name</th><th>Submitted</th><th>Files</th><th>Joined</th></tr></thead><tbody>${r.users.map((u) => `<tr><td>${esc(u.roll_no)}</td><td>${esc(u.name)}</td><td>${u.submitted}</td><td>${u.files}</td><td class="muted small">${fmtDate(u.created_at, false)}</td></tr>`).join("")}</tbody></table></div>`;
+      window._users = r.users;
+      document.getElementById("usersBox").innerHTML = `<button class="btn sm ghost" id="loadUsers" style="margin-bottom:8px">↻ Refresh</button><div class="scroll"><table class="t"><thead><tr><th>Roll</th><th>Name</th><th>Sec</th><th>Done</th><th>Files</th><th>Joined</th><th></th></tr></thead><tbody>${r.users.map((u) => `<tr><td>${esc(u.roll_no)}</td><td>${esc(u.name)}</td><td>${esc(u.section || "")}</td><td>${u.submitted}</td><td>${u.files}</td><td class="muted small">${fmtDate(u.created_at, false)}</td>
+        <td style="white-space:nowrap"><button class="btn sm ghost" data-edit-user="${esc(u.roll_no)}">Edit</button>${u.roll_no === S.user.roll_no ? "" : ` <button class="btn sm danger" data-del-user="${esc(u.roll_no)}">✕</button>`}</td></tr>`).join("")}</tbody></table></div>`;
+      wireUsers();
+      document.getElementById("loadUsers").onclick = lu.onclick;
     } catch (e) { toast(e.message, true); }
   };
 }

@@ -564,6 +564,44 @@ const routes = {
     if (b.notify !== false) await broadcast({ title, body: String(b.body || "").replace(/^[-*]\s*/gm, "• ").slice(0, 180), url: kind === "release" ? "/#/updates" : "/#/notifications" });
     return json({ update: rows[0] });
   },
+  "PUT update": async ({ req, body: b }, id) => {
+    await needAdmin(req);
+    const title = str(b.title, 200)?.trim();
+    if (!title) bad("Enter a title");
+    const kind = ["release", "notice", "alert"].includes(b.kind) ? b.kind : "notice";
+    const rows = await q("update updates set version=$1, title=$2, body=$3, kind=$4 where id=$5 returning *", [str(b.version, 20) || null, title, str(b.body, 5000), kind, id]);
+    if (b.notify) await broadcast({ title: "Updated: " + title, body: String(b.body || "").replace(/^[-*]\s*/gm, "• ").slice(0, 180), url: "/#/notifications" });
+    return json({ update: rows[0] });
+  },
+  "PUT subject": async ({ req, body: b }, id) => {
+    const u = await needUser(req);
+    const s = (await q("select * from subjects where id=$1", [id]))[0];
+    if (!s || (s.owner_id ? s.owner_id !== u.id : !u.is_admin)) throw new HttpError(403, "You can't edit this subject");
+    const name = str(b.name, 100)?.trim();
+    if (!name) bad("Enter a subject name");
+    const rows = await q(`update subjects set name=$1, short=$2, code=$3, credits=$4, color=$5 where id=$6
+      returning id, code, name, short, credits, kind, is_default, units, color, owner_id, sort`,
+      [name, str(b.short, 14)?.trim() || name.slice(0, 12), str(b.code, 20)?.trim() || null, numOrNull(b.credits), /^#[0-9a-f]{6}$/i.test(b.color || "") ? b.color : s.color, id]);
+    return json({ subject: rows[0] });
+  },
+  "PUT admin/user": async ({ req, body: b }) => {
+    await needAdmin(req);
+    const name = str(b.name, 80)?.trim();
+    if (!name) bad("Enter a name");
+    const rows = await q("update users set name=$1, section=$2 where roll_no=$3 returning roll_no, name, section", [name, str(b.section, 20) || null, normRoll(b.roll_no)]);
+    if (!rows.length) bad("No account with that roll number");
+    return json({ user: rows[0] });
+  },
+  "POST admin/delete-user": async ({ req, body: b }) => {
+    const me = await needAdmin(req);
+    const roll = normRoll(b.roll_no);
+    if (roll === me.roll_no) bad("You can't delete your own account");
+    const keys = await q("select pathname from files f join users u on u.id=f.user_id where u.roll_no=$1", [roll]);
+    const rows = await q("delete from users where roll_no=$1 returning roll_no, name", [roll]);
+    if (!rows.length) bad("No account with that roll number");
+    for (const k of keys) { try { await s3Del(k.pathname); } catch {} }
+    return json({ user: rows[0] });
+  },
   "DELETE update": async ({ req }, id) => {
     await needAdmin(req);
     await q("delete from updates where id=$1", [id]);
