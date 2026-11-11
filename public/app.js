@@ -1,8 +1,6 @@
 // Sem 7 Tracker — vanilla JS SPA
 const $app = document.getElementById("app");
 const KIND_LABEL = { TA1: "TA 1", TA2: "TA 2", TA3: "TA 3", TA4: "TA 4", TA5: "TA 5", ERLA1: "ERLA 1", ERLA2: "ERLA 2", PA: "PA" };
-const KIND_FULL = { TA: "Thematic Assessment", ERLA: "ERLA", PA: "PA" };
-const EXAM_NAME = "Unit Assessment-2 (Dec 2026)";
 const EXAM_VENUE = "Vikram Sarabhai (E-Block), SoET";
 
 let S = null;          // bootstrap data
@@ -10,11 +8,15 @@ let route = "home";
 let routeArg = null;
 let subTab = "assess";
 let nextSubTab = null;
+let calMonth = null;   // "YYYY-MM"
+let calSel = null;     // "YYYY-MM-DD"
+const notesCache = {};
 
 // ------------------------------------------------------------ utils
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const todayISO = () => { const d = new Date(); return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10); };
 const dOnly = (v) => (v ? String(v).slice(0, 10) : "");
+const isoOf = (d) => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
 function daysUntil(iso) {
   if (!iso) return null;
   const a = new Date(todayISO() + "T00:00:00"), b = new Date(dOnly(iso) + "T00:00:00");
@@ -24,6 +26,10 @@ function fmtDate(iso, withDay = true) {
   if (!iso) return "";
   const d = new Date(dOnly(iso) + "T00:00:00");
   return d.toLocaleDateString("en-IN", withDay ? { weekday: "short", day: "numeric", month: "short" } : { day: "numeric", month: "short" });
+}
+function fmtStamp(ts) {
+  const d = new Date(ts);
+  return d.toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" }) + ", " + d.toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit" });
 }
 function dueLabel(iso) {
   const n = daysUntil(iso);
@@ -55,12 +61,48 @@ function download(name, text, type = "application/json") {
   a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
+// tiny, safe markdown renderer (headings, lists, tables, quotes, bold/italic/code, hr)
+function md(src) {
+  const inline = (t) => esc(t)
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
+    .replace(/(^|[\s(])\*([^*\n]+)\*(?=[\s).,;:!?]|$)/g, "$1<i>$2</i>")
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  const lines = String(src || "").replace(/\r/g, "").split("\n");
+  let out = "", i = 0;
+  while (i < lines.length) {
+    const l = lines[i];
+    if (!l.trim()) { i++; continue; }
+    let m;
+    if ((m = l.match(/^(#{1,4})\s+(.*)/))) { const n = m[1].length; out += `<h${n + 1}>${inline(m[2])}</h${n + 1}>`; i++; continue; }
+    if (/^---+\s*$/.test(l)) { out += "<hr>"; i++; continue; }
+    if (/^>\s?/.test(l)) { let q = []; while (i < lines.length && /^>\s?/.test(lines[i])) q.push(lines[i++].replace(/^>\s?/, "")); out += `<blockquote>${inline(q.join(" "))}</blockquote>`; continue; }
+    if (/^\|.*\|\s*$/.test(l)) {
+      const rows = []; while (i < lines.length && /^\|.*\|\s*$/.test(lines[i])) rows.push(lines[i++]);
+      const cells = (r) => r.trim().replace(/^\||\|$/g, "").split("|").map((c) => c.trim());
+      const body = rows.filter((r) => !/^\|[\s:|-]+\|\s*$/.test(r));
+      out += `<div class="scroll"><table class="t md-t"><thead><tr>${cells(body[0]).map((c) => `<th>${inline(c)}</th>`).join("")}</tr></thead><tbody>${body.slice(1).map((r) => `<tr>${cells(r).map((c) => `<td>${inline(c)}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`;
+      continue;
+    }
+    if (/^\s*[-*]\s+/.test(l)) { let it = []; while (i < lines.length && /^\s*[-*]\s+/.test(lines[i])) it.push(lines[i++].replace(/^\s*[-*]\s+/, "")); out += `<ul>${it.map((x) => `<li>${inline(x)}</li>`).join("")}</ul>`; continue; }
+    if (/^\s*\d+[.)]\s+/.test(l)) { let it = []; while (i < lines.length && /^\s*\d+[.)]\s+/.test(lines[i])) it.push(lines[i++].replace(/^\s*\d+[.)]\s+/, "")); out += `<ol>${it.map((x) => `<li>${inline(x)}</li>`).join("")}</ol>`; continue; }
+    let p = []; while (i < lines.length && lines[i].trim() && !/^(#{1,4}\s|>|\||\s*[-*]\s|\s*\d+[.)]\s|---)/.test(lines[i])) p.push(lines[i++]);
+    if (!p.length) p.push(lines[i++]);
+    out += `<p>${inline(p.join(" "))}</p>`;
+  }
+  return out;
+}
+
 // ------------------------------------------------------------ derived data
 const prefs = () => S.user.prefs || {};
-function visibleSubjects() {
-  const p = prefs(), hidden = new Set(p.hidden || []), el = new Set(p.electives || []);
-  return S.subjects.filter((s) => s.owner_id ? true : s.kind === "elective" ? el.has(s.id) : !hidden.has(s.id));
+function isVisible(s) {
+  if (!s) return false;
+  const p = prefs();
+  if (s.owner_id) return true;
+  if (s.kind === "elective") return (p.electives || []).includes(s.id);
+  return !(p.hidden || []).includes(s.id);
 }
+const visibleSubjects = () => S.subjects.filter(isVisible);
 const subjById = (id) => S.subjects.find((s) => s.id === Number(id));
 function kindsFor(sid) { const k = (prefs().kinds || {})[sid]; return Array.isArray(k) && k.length ? S.kinds.filter((x) => k.includes(x)) : S.kinds; }
 function getA(sid, kind) {
@@ -70,27 +112,41 @@ function getA(sid, kind) {
 const batchDL = (sid, kind) => S.deadlines.find((d) => d.subject_id === sid && d.kind === kind);
 const effDue = (a) => dOnly(a.due_date) || dOnly(batchDL(a.subject_id, a.kind)?.due_date) || "";
 function aScore(a) { return a.submitted ? 1 : ((a.report ? 1 : 0) + (a.ppt ? 1 : 0) + (a.viva ? 1 : 0)) / 4; }
-function subjProgress(s) {
-  const ks = kindsFor(s.id); if (!ks.length) return 0;
-  return ks.reduce((t, k) => t + aScore(getA(s.id, k)), 0) / ks.length;
-}
-function topicKeys(s) { const out = []; (s.units || []).forEach((u, i) => u.topics.forEach((_, j) => out.push(`${i}.${j}`))); return out; }
+function subjProgress(s) { const ks = kindsFor(s.id); return ks.length ? ks.reduce((t, k) => t + aScore(getA(s.id, k)), 0) / ks.length : 0; }
 const topicDone = (sid, key) => S.topics.some((t) => t.subject_id === sid && t.topic_key === key);
-function syllabusProgress(s) { const ks = topicKeys(s); if (!ks.length) return null; return ks.filter((k) => topicDone(s.id, k)).length / ks.length; }
-const pct = (x) => Math.round((x || 0) * 100);
-
-function upcoming() {
-  const items = [];
-  for (const s of visibleSubjects()) {
-    for (const k of kindsFor(s.id)) {
-      const a = getA(s.id, k), due = effDue(a);
-      if (due && !a.submitted && daysUntil(due) >= -14) items.push({ due, s, title: `${KIND_LABEL[k]}${a.topic ? " · " + a.topic : ""}`, href: `#/subject/${s.id}`, type: "as" });
-    }
-    if (s.exam_date && daysUntil(s.exam_date) >= 0) items.push({ due: dOnly(s.exam_date), s, title: `UA-2 exam · ${s.exam_slot || ""}`, href: "#/exams", type: "exam" });
-  }
-  if (prefs().showAssignments) for (const a of S.assignments) if (!a.done && a.due_date) items.push({ due: dOnly(a.due_date), s: subjById(a.subject_id), title: a.title, href: "#/assignments", type: "asg" });
-  return items.sort((a, b) => a.due.localeCompare(b.due));
+function syllabusProgress(s) {
+  const ks = []; (s.units || []).forEach((u, i) => u.topics.forEach((_, j) => ks.push(`${i}.${j}`)));
+  return ks.length ? ks.filter((k) => topicDone(s.id, k)).length / ks.length : null;
 }
+const pct = (x) => Math.round((x || 0) * 100);
+const examsFor = (sid) => S.exams.filter((e) => e.subject_id === sid);
+const myExams = () => S.exams.filter((e) => isVisible(subjById(e.subject_id)));
+
+// everything with a date, for calendar / reminders / home
+function datedItems() {
+  const out = [];
+  for (const e of myExams()) if (e.exam_date) { const s = subjById(e.subject_id); out.push({ date: dOnly(e.exam_date), type: "exam", s, title: `${s.short} ${e.name}`, time: e.slot, note: e.note, href: "#/exams" }); }
+  for (const s of visibleSubjects()) for (const k of kindsFor(s.id)) {
+    const a = getA(s.id, k), due = effDue(a);
+    if (due && !a.submitted) out.push({ date: due, type: a.due_date ? "assess" : "deadline", s, title: `${s.short} ${KIND_LABEL[k]} due${a.topic ? " — " + a.topic : ""}`, note: batchDL(s.id, k)?.note, href: `#/subject/${s.id}` });
+  }
+  for (const a of S.assignments) if (!a.done && a.due_date) out.push({ date: dOnly(a.due_date), type: "asg", s: subjById(a.subject_id), title: `Assignment: ${a.title}`, href: "#/assignments" });
+  for (const ev of S.events) {
+    const s = subjById(ev.subject_id);
+    if (!ev.user_id && s && !isVisible(s)) continue;
+    out.push({ date: dOnly(ev.event_date), type: ev.user_id ? "event" : "batch", s, title: ev.title, time: ev.event_time, note: ev.note, ev, color: ev.color });
+  }
+  return out.sort((a, b) => a.date.localeCompare(b.date) || (a.time || "").localeCompare(b.time || ""));
+}
+const TYPE_META = {
+  exam: ["Unit assessment", "brand"], deadline: ["Batch deadline", "amber"], assess: ["My due date", "amber"],
+  asg: ["Assignment", ""], event: ["My event", "green"], batch: ["Class event", "brand"],
+};
+function reminders() {
+  return datedItems().filter((x) => { const n = daysUntil(x.date); return x.type === "exam" ? n >= 0 && n <= 7 : n >= -7 && n <= 3; });
+}
+function unreadUpdates() { const seen = prefs().notifSeen || S.user.created_at; return S.updates.filter((u) => u.created_at > seen); }
+function badgeCount() { return unreadUpdates().length + reminders().filter((x) => daysUntil(x.date) <= 1).length; }
 
 async function savePrefs(patch) {
   S.user.prefs = { ...prefs(), ...patch };
@@ -107,7 +163,7 @@ function renderAuth(mode = "login") {
       <div>
         <h1>Every TA, ERLA, PA, report, PPT and viva in one place.</h1>
         <p>Built for B.Tech CSE (Data Science), 7th semester, SGT University. Your own account, your own progress, your files saved in the cloud.</p>
-        <div class="chips"><span>TA 1–5</span><span>ERLA 1–2</span><span>PA</span><span>Report · PPT · Viva</span><span>Syllabus checklist</span><span>File locker</span><span>UA-2 countdown</span></div>
+        <div class="chips"><span>TA 1–5</span><span>ERLA 1–2</span><span>PA</span><span>Report · PPT · Viva</span><span>Calendar</span><span>Study notes</span><span>Reminders</span><span>File locker</span></div>
       </div>
       <div class="small" style="opacity:.8">Data is private to your account.</div>
       <div class="blob"></div>
@@ -124,7 +180,7 @@ function renderAuth(mode = "login") {
         <div class="err" id="aerr"></div>
         <button class="btn grad block" type="submit">${mode === "login" ? "Log in" : "Create account"}</button>
       </form>
-      <p class="muted small" style="margin-top:14px">${mode === "login" ? "Forgot your password? Ask the class admin to reset it." : "No email needed. Remember your password — the class admin can reset it if you forget."}</p>
+      <p class="muted small" style="margin-top:14px">${mode === "login" ? "Forgot your password? Ask the class admin (Nikshey) to reset it." : "No email needed. Remember your password — the class admin can reset it if you forget."}</p>
     </div></div>
   </div>`;
   $app.querySelectorAll("[data-m]").forEach((b) => (b.onclick = () => renderAuth(b.dataset.m)));
@@ -138,29 +194,35 @@ function renderAuth(mode = "login") {
 }
 
 // ------------------------------------------------------------ shell
-const NAV = [
-  ["home", "Home", "⌂"], ["subjects", "Subjects", "▦"], ["checklist", "Checklist", "☑"], ["files", "Files", "⇪"], ["exams", "Exams", "◷"],
-];
+function navItems() {
+  const nav = [["home", "Home", "⌂"], ["subjects", "Subjects", "▦"], ["calendar", "Calendar", "▤"], ["notes", "Notes", "✎"], ["checklist", "Checklist", "☑"], ["files", "Files", "⇪"]];
+  if (prefs().showAssignments) nav.splice(5, 0, ["assignments", "Assignments", "✍"]);
+  return nav;
+}
 function shell(content) {
-  const p = prefs();
-  const nav = NAV.slice();
-  if (p.showAssignments) nav.splice(3, 0, ["assignments", "Assignments", "✎"]);
+  const nav = navItems();
   const active = route === "subject" ? "subjects" : route;
   const initials = S.user.name.split(/\s+/).map((w) => w[0]).slice(0, 2).join("").toUpperCase();
+  const badge = badgeCount();
+  const bottom = [["home", "Home", "⌂"], ["subjects", "Subjects", "▦"], ["calendar", "Calendar", "▤"], ["checklist", "Checklist", "☑"], ["files", "Files", "⇪"]];
   return `
   <header class="top"><div class="top-in">
-    <a class="logo" href="#/home"><i>✓</i><span>Sem 7 Tracker</span></a>
+    <a class="logo" href="#/home"><i>✓</i><span class="logo-t">Sem 7 Tracker</span></a>
     <nav class="nav">${nav.map(([r, l]) => `<a href="#/${r}" class="${active === r ? "on" : ""}">${l}</a>`).join("")}</nav>
     <div class="spacer"></div>
+    <a class="bell ${active === "notifications" ? "on" : ""}" href="#/notifications" title="Notifications" aria-label="Notifications${badge ? ` (${badge} new)` : ""}">🔔${badge ? `<b>${badge > 9 ? "9+" : badge}</b>` : ""}</a>
     <div class="menu" id="more">
       <button class="btn ghost sm" id="moreBtn" aria-haspopup="true">More ▾</button>
       <div class="menu-pop" role="menu">
-        <a href="#/assignments">✎ Assignments${p.showAssignments ? "" : ' <span class="pill" style="margin-left:auto">optional</span>'}</a>
-        <a href="#/exams">◷ UA-2 date sheet</a>
+        <a href="#/notes">✎ Study notes</a>
+        <a href="#/assignments">✍ Assignments${prefs().showAssignments ? "" : ' <span class="pill" style="margin-left:auto">optional</span>'}</a>
+        <a href="#/exams">◷ Unit assessments</a>
+        <a href="#/notifications">🔔 Notifications</a>
+        <a href="#/updates">✦ Update log</a>
         <a href="#/settings">⚙ Subjects &amp; settings</a>
         <button id="expJson">⤓ Export my data (JSON)</button>
         <button id="expCsv">⤓ Export tracker (CSV)</button>
-        ${S.user.is_admin ? `<hr><a href="#/admin">★ Admin: batch deadlines</a>` : ""}
+        ${S.user.is_admin ? `<hr><a href="#/admin">★ Admin panel</a>` : ""}
       </div>
     </div>
     <div class="menu" id="me">
@@ -175,7 +237,7 @@ function shell(content) {
     </div>
   </div></header>
   <main class="main" id="main">${content}</main>
-  <nav class="bottom-nav">${nav.map(([r, l, ic]) => `<a href="#/${r}" class="${active === r ? "on" : ""}"><b>${ic}</b>${l}</a>`).join("")}</nav>`;
+  <nav class="bottom-nav">${bottom.map(([r, l, ic]) => `<a href="#/${r}" class="${active === r ? "on" : ""}"><b>${ic}</b>${l}</a>`).join("")}</nav>`;
 }
 function wireShell() {
   for (const id of ["more", "me"]) {
@@ -193,34 +255,42 @@ function wireShell() {
 document.addEventListener("click", () => document.querySelectorAll(".menu.open").forEach((x) => x.classList.remove("open")));
 
 // ------------------------------------------------------------ pages
+function itemRow(x, opts = {}) {
+  const [label, tone] = TYPE_META[x.type] || ["", ""];
+  const href = x.href || (x.ev ? "#/calendar" : "#/home");
+  return `<a class="li" href="${href}" ${x.ev ? `data-cal-date="${x.date}"` : ""} style="text-decoration:none;color:inherit">
+    <span class="dot" style="--c:${x.color || x.s?.color || "#64748b"}"></span>
+    <div style="flex:1;min-width:0"><div class="ellip" style="font-weight:700">${esc(x.title)}</div>
+      <div class="muted small">${opts.noDate ? "" : fmtDate(x.date) + " · "}${label}${x.time ? " · " + esc(x.time) : ""}</div></div>
+    ${dueLabel(x.date)}</a>`;
+}
+
 function pageHome() {
   const subs = visibleSubjects();
-  const up = upcoming().filter((x) => daysUntil(x.due) >= -14).slice(0, 8);
-  const exams = subs.filter((s) => s.exam_date && daysUntil(s.exam_date) >= 0).sort((a, b) => dOnly(a.exam_date).localeCompare(dOnly(b.exam_date)));
+  const items = datedItems().filter((x) => { const n = daysUntil(x.date); return n >= -7 && n <= 30; }).slice(0, 8);
+  const exams = myExams().filter((e) => e.exam_date && daysUntil(e.exam_date) >= 0).sort((a, b) => dOnly(a.exam_date).localeCompare(dOnly(b.exam_date)));
   const next = exams[0];
-  let total = 0, sub = 0, comp = 0;
-  for (const s of subs) for (const k of kindsFor(s.id)) { const a = getA(s.id, k); total++; if (a.submitted) sub++; comp += (a.report ? 1 : 0) + (a.ppt ? 1 : 0) + (a.viva ? 1 : 0); }
+  let total = 0, sub = 0;
+  for (const s of subs) for (const k of kindsFor(s.id)) { total++; if (getA(s.id, k).submitted) sub++; }
   const sylSubs = subs.filter((s) => syllabusProgress(s) !== null);
   const syl = sylSubs.length ? sylSubs.reduce((t, s) => t + syllabusProgress(s), 0) / sylSubs.length : 0;
   const openTodos = S.todos.filter((t) => !t.done);
+  const latest = S.updates.find((u) => u.kind !== "release");
   const first = S.user.name.split(" ")[0];
   return `
   <section class="hero">
     <h2>Hey ${esc(first)} 👋</h2>
-    <p>${next ? `Next up: <b>${esc(next.name)}</b> on ${fmtDate(next.exam_date)} (${esc(next.exam_slot || "")}).` : "No upcoming exams on the date sheet."}</p>
+    <p>${next ? `Next up: <b>${esc(subjById(next.subject_id)?.name)} ${esc(next.name)}</b> on ${fmtDate(next.exam_date)}${next.slot ? ` (${esc(next.slot)})` : ""}.` : "No upcoming unit assessments."}</p>
     <div class="count">
-      ${next ? `<div><b>${daysUntil(next.exam_date)}</b><span>days to UA-2</span></div>` : ""}
-      <div><b>${sub}/${total}</b><span>assessments submitted</span></div>
+      ${next ? `<div><b>${daysUntil(next.exam_date)}</b><span>days to ${esc(next.name)}</span></div>` : ""}
+      <div><b>${sub}/${total}</b><span>assessments done</span></div>
       <div><b>${pct(syl)}%</b><span>syllabus covered</span></div>
     </div>
   </section>
+  ${latest && unreadUpdates().some((u) => u.id === latest.id) ? `<a class="card notice" href="#/notifications"><b>📣 ${esc(latest.title)}</b><span class="muted small">${esc((latest.body || "").split("\n")[0])}</span></a>` : ""}
   <div class="grid g2">
-    <div class="card"><h3>⏰ Coming up</h3>
-      ${up.length ? `<div class="list">${up.map((x) => `<a class="li" href="${x.href}" style="text-decoration:none;color:inherit">
-          <span class="dot" style="--c:${x.s?.color || "#64748b"}"></span>
-          <div style="flex:1;min-width:0"><div style="font-weight:700">${esc(x.s?.short || "General")} — ${esc(x.title)}</div><div class="muted small">${fmtDate(x.due)}</div></div>
-          ${x.type === "exam" ? '<span class="pill brand">exam</span>' : ""}${dueLabel(x.due)}</a>`).join("")}</div>`
-        : `<div class="empty">Nothing dated yet. Add due dates inside a subject's TA / ERLA / PA cards.</div>`}
+    <div class="card"><h3>⏰ Coming up <a href="#/calendar" class="small" style="margin-left:auto;font-weight:600">calendar</a></h3>
+      ${items.length ? `<div class="list">${items.map((x) => itemRow(x)).join("")}</div>` : `<div class="empty">Nothing dated yet. Add due dates in a subject's TA / ERLA / PA cards, or add events in the calendar.</div>`}
     </div>
     <div class="card"><h3>☑ Quick checklist <a href="#/checklist" class="small" style="margin-left:auto;font-weight:600">open</a></h3>
       <form id="qtodo" class="row" style="margin-bottom:8px"><input class="in" name="text" placeholder="Add a to-do… e.g. print BDA report"><button class="btn primary">Add</button></form>
@@ -234,19 +304,24 @@ function pageHome() {
 
 function subjCard(s) {
   const p = subjProgress(s), syl = syllabusProgress(s);
-  const pips = kindsFor(s.id).map((k) => { const a = getA(s.id, k), sc = aScore(a); return `<i class="${sc >= 1 ? "full" : sc > 0 ? "half" : ""}" title="${KIND_LABEL[k]}"></i>`; }).join("");
-  return `<a class="card subj" href="#/subject/${s.id}" style="--c:${s.color || "#6366f1"}">
-    <div class="row between"><span class="tag">${esc(s.short)}</span>${s.exam_date ? `<span class="small muted">UA-2 ${fmtDate(s.exam_date, false)}</span>` : ""}</div>
+  const pips = kindsFor(s.id).map((k) => { const sc = aScore(getA(s.id, k)); return `<i class="${sc >= 1 ? "full" : sc > 0 ? "half" : ""}" title="${KIND_LABEL[k]}"></i>`; }).join("");
+  const nextEx = examsFor(s.id).filter((e) => e.exam_date && daysUntil(e.exam_date) >= 0).sort((a, b) => dOnly(a.exam_date).localeCompare(dOnly(b.exam_date)))[0];
+  return `<div class="card subj" style="--c:${s.color || "#6366f1"}">
+    <a class="cover" href="#/subject/${s.id}" aria-label="${esc(s.name)}"></a>
+    <div class="row between"><span class="tag">${esc(s.short)}</span>${nextEx ? `<span class="small muted">${esc(nextEx.name)} ${fmtDate(nextEx.exam_date, false)}</span>` : ""}</div>
     <h4>${esc(s.name)}</h4>
-    <div class="meta">${s.code ? esc(s.code) : ""}${s.credits ? ` · ${s.credits} credits` : ""}${s.kind === "elective" ? " · elective" : ""}${s.owner_id ? " · custom" : ""}</div>
+    <div class="meta">${s.code ? esc(s.code) : ""}${s.credits ? ` · ${s.credits} credits` : ""}${s.kind === "elective" ? " · elective" : s.kind === "minor" ? " · minor elective" : ""}${s.owner_id ? " · custom" : ""}</div>
     <div class="row between small"><b>Assessments ${pct(p)}%</b>${syl !== null ? `<span class="muted">Syllabus ${pct(syl)}%</span>` : ""}</div>
     <div class="pips">${pips}</div>
-  </a>`;
+    ${s.has_notes ? `<a class="notes-link" href="#/notes/${s.id}">📘 Study notes</a>` : ""}
+  </div>`;
 }
 
 function pageSubjects() {
   const subs = visibleSubjects();
-  return `<h1 class="page">Subjects</h1><p class="sub">B.Tech CSE (Data Science) · Semester VII. Tap a subject to track TA, ERLA, PA, files and syllabus.</p>
+  const withNotes = subs.filter((s) => s.has_notes);
+  return `<h1 class="page">Subjects</h1><p class="sub">B.Tech CSE (Data Science) · Semester VII. Tap a subject to track TA, ERLA, PA, files, syllabus and notes.</p>
+  ${withNotes.length ? `<div class="card notes-strip"><b>📘 Study notes</b>${withNotes.map((s) => `<a class="pill brand" href="#/notes/${s.id}">${esc(s.short)}</a>`).join("")}<a class="small" href="#/notes" style="margin-left:auto">all notes →</a></div>` : ""}
   <div class="grid g3">${subs.map(subjCard).join("")}</div>
   <div class="card" style="margin-top:16px"><div class="row between wrap"><div><b>Missing a subject or elective?</b><div class="muted small">Turn on your elective, hide ones you don't take, or add your own.</div></div><a class="btn ghost" href="#/settings">Manage subjects</a></div></div>`;
 }
@@ -256,19 +331,22 @@ function pageSubject() {
   if (!s) return `<div class="empty">Subject not found. <a href="#/subjects">Back</a></div>`;
   const syl = syllabusProgress(s);
   const files = S.files.filter((f) => f.subject_id === s.id);
-  const tabs = [["assess", "TA · ERLA · PA"], ["syllabus", `Syllabus${syl !== null ? ` ${pct(syl)}%` : ""}`], ["files", `Files (${files.length})`], ["cols", "Customise"]];
+  const tabs = [["assess", "TA · ERLA · PA"], ["syllabus", `Syllabus${syl !== null ? ` ${pct(syl)}%` : ""}`], ...(s.has_notes ? [["notes", "📘 Study notes"]] : []), ["files", `Files (${files.length})`], ["cols", "Customise"]];
+  if (!tabs.some(([t]) => t === subTab)) subTab = "assess";
   let body = "";
   if (subTab === "assess") body = `<div class="as-grid">${kindsFor(s.id).map((k) => asCard(s, k)).join("")}</div>`;
   else if (subTab === "syllabus") body = syllabusView(s);
+  else if (subTab === "notes") body = notesBody(s);
   else if (subTab === "files") body = filesView(files, s.id);
   else body = `<div class="card"><h3>Which assessments apply to ${esc(s.short)}?</h3>
       <p class="muted small" style="margin-top:-6px">Untick ones your faculty isn't taking (e.g. IT2 may have no TA 5). Only affects your view.</p>
       <form id="kindsF" class="kchips">${S.kinds.map((k) => `<label><input type="checkbox" name="k" value="${k}" ${kindsFor(s.id).includes(k) ? "checked" : ""}> ${KIND_LABEL[k]}</label>`).join("")}</form></div>`;
+  const ex = examsFor(s.id).filter((e) => e.exam_date || e.slot);
   return `
   <div class="sd-head" style="--c:${s.color || "#6366f1"}">
     <a class="back" href="#/subjects">← All subjects</a>
     <h1>${esc(s.name)}</h1>
-    <div class="row wrap">${s.code ? `<span>${esc(s.code)}</span>` : ""}${s.credits ? `<span>${s.credits} credits</span>` : ""}${s.exam_date ? `<span>UA-2: ${fmtDate(s.exam_date)} · ${esc(s.exam_slot || "")}</span>` : ""}<span>Assessments ${pct(subjProgress(s))}%</span></div>
+    <div class="row wrap">${s.code ? `<span>${esc(s.code)}</span>` : ""}${s.credits ? `<span>${s.credits} credits</span>` : ""}${ex.map((e) => `<span>${esc(e.name)}: ${e.exam_date ? fmtDate(e.exam_date) : "TBA"}${e.slot ? " · " + esc(e.slot) : ""}</span>`).join("")}<span>Assessments ${pct(subjProgress(s))}%</span></div>
   </div>
   <div class="seg">${tabs.map(([t, l]) => `<button data-st="${t}" class="${subTab === t ? "on" : ""}">${l}</button>`).join("")}</div>
   <div style="--c:${s.color || "#6366f1"}">${body}</div>`;
@@ -296,7 +374,7 @@ function asCard(s, k) {
 }
 
 function syllabusView(s) {
-  if (!s.units?.length) return `<div class="card empty">No syllabus units for this subject. Use the Checklist tab for your own to-dos.</div>`;
+  if (!s.units?.length) return `<div class="card empty">No syllabus units for this subject yet. Use the Checklist tab for your own to-dos.</div>`;
   return `<div class="grid g2">${s.units.map((u, i) => {
     const keys = u.topics.map((_, j) => `${i}.${j}`), done = keys.filter((k) => topicDone(s.id, k)).length;
     return `<div class="card unit"><h4>${esc(u.title)} <span class="pill ${done === keys.length ? "green" : ""}">${done}/${keys.length}</span></h4>
@@ -304,6 +382,39 @@ function syllabusView(s) {
       ${u.topics.map((t, j) => { const on = topicDone(s.id, `${i}.${j}`); return `<label class="tcheck ${on ? "on" : ""}"><input type="checkbox" data-topic="${i}.${j}" data-sid="${s.id}" ${on ? "checked" : ""}><span>${esc(t)}</span></label>`; }).join("")}
     </div>`;
   }).join("")}</div>`;
+}
+
+// ---- study notes
+function notesBody(s) {
+  const n = notesCache[s.id];
+  if (!n) { loadNotes(s.id); return `<div class="card empty"><div class="spinner" style="margin:0 auto 10px"></div>Loading notes…</div>`; }
+  const editing = S.user.is_admin && notesCache._edit === s.id;
+  if (editing) return `<div class="card"><h3>Edit study notes · ${esc(s.short)}</h3>
+    <p class="muted small" style="margin-top:-6px">Markdown: # headings, - bullets, **bold**, | tables |, > quotes.</p>
+    <textarea class="in mono" id="notesEd" rows="24">${esc(n.notes_md)}</textarea>
+    <div class="row wrap" style="margin-top:10px"><button class="btn primary" id="notesSave">Save notes</button><button class="btn ghost" id="notesCancel">Cancel</button>${n.custom ? `<button class="btn danger" id="notesReset">Reset to default</button>` : ""}</div></div>`;
+  if (!n.notes_md) return `<div class="card empty">No study notes for ${esc(s.short)} yet.${S.user.is_admin ? ` <button class="btn sm ghost" id="notesEdit">Write notes</button>` : ""}</div>`;
+  const heads = [...n.notes_md.matchAll(/^##\s+(.+)$/gm)].map((m) => m[1]);
+  return `<div class="notes-wrap">
+    ${heads.length > 2 ? `<aside class="card toc"><b class="small muted">ON THIS PAGE</b>${heads.map((h, i) => `<a href="#" data-toc="${i}">${esc(h)}</a>`).join("")}</aside>` : ""}
+    <article class="card md">${S.user.is_admin ? `<button class="btn sm ghost" id="notesEdit" style="float:right">✎ Edit</button>` : ""}${md(n.notes_md)}</article></div>`;
+}
+async function loadNotes(id) {
+  try { notesCache[id] = await api("GET", `notes/${id}`); } catch (e) { notesCache[id] = { notes_md: "", custom: false }; toast(e.message, true); }
+  render();
+}
+function pageNotes() {
+  if (routeArg) {
+    const s = subjById(routeArg);
+    if (!s) return `<div class="empty">Subject not found.</div>`;
+    return `<a class="back-link" href="#/notes">← All study notes</a>
+      <div class="sd-head slim" style="--c:${s.color}"><h1>📘 ${esc(s.name)}</h1><div class="row wrap"><a href="#/subject/${s.id}" style="color:#fff;font-weight:700">Open tracker →</a></div></div>
+      <div style="--c:${s.color}">${notesBody(s)}</div>`;
+  }
+  const subs = visibleSubjects();
+  return `<h1 class="page">Study notes</h1><p class="sub">Exam-oriented notes for your subjects. More subjects will be added.</p>
+  <div class="grid g3">${subs.map((s) => `<a class="card subj" href="#/notes/${s.id}" style="--c:${s.color};${s.has_notes ? "" : "opacity:.55"}">
+    <span class="tag">${esc(s.short)}</span><h4>${esc(s.name)}</h4><div class="meta">${s.has_notes ? "📘 Notes available" : "Coming soon"}</div></a>`).join("")}</div>`;
 }
 
 function filesView(files, sid = null) {
@@ -316,25 +427,22 @@ function filesView(files, sid = null) {
     </div>
     <div class="progress" id="upProg"></div>
   </div>
-  <div class="card">${files.length ? `<div class="scroll"><table class="t"><thead><tr><th>File</th>${sid ? "" : "<th>Subject</th>"}<th>For</th><th>Size</th><th>Added</th><th></th></tr></thead><tbody>
-    ${files.map((f) => { const s = subjById(f.subject_id); return `<tr>
-      <td style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><a href="/api/file/${f.id}" target="_blank" rel="noopener" style="font-weight:700;text-decoration:none;color:inherit">📎 ${esc(f.name)}</a></td>
-      ${sid ? "" : `<td>${s ? `<span class="row" style="gap:6px"><span class="dot" style="--c:${s.color}"></span>${esc(s.short)}</span>` : '<span class="muted">General</span>'}</td>`}
-      <td>${f.kind ? `<span class="pill">${KIND_LABEL[f.kind] || esc(f.kind)}</span>` : ""}</td>
-      <td class="muted">${fmtSize(f.size)}</td><td class="muted">${fmtDate(f.created_at, false)}</td>
-      <td style="white-space:nowrap"><a class="btn sm ghost" href="/api/file/${f.id}?download=1">⤓ Download</a> <button class="btn sm danger" data-delfile="${f.id}">✕</button></td></tr>`; }).join("")}
-    </tbody></table></div>` : `<div class="empty">No files yet. Everything you upload here is saved to your account, so you can download it from any device.</div>`}</div>`;
+  <div class="card">${files.length ? `<div class="list">${files.map((f) => { const s = subjById(f.subject_id); return `<div class="li file-row">
+      <span class="dot" style="--c:${s?.color || "#94a3b8"}"></span>
+      <div style="flex:1;min-width:0"><a class="ellip" href="/api/file/${f.id}" target="_blank" rel="noopener" style="font-weight:700;text-decoration:none;color:inherit;display:block">📎 ${esc(f.name)}</a>
+        <div class="muted small">${sid ? "" : (s ? esc(s.short) : "General") + " · "}${f.kind ? KIND_LABEL[f.kind] + " · " : ""}${fmtSize(f.size)} · ${fmtDate(f.created_at, false)}</div></div>
+      <a class="btn sm ghost" href="/api/file/${f.id}?download=1" title="Download">⤓<span class="hide-sm"> Download</span></a>
+      <button class="btn sm danger" data-delfile="${f.id}" title="Delete">✕</button></div>`; }).join("")}</div>`
+    : `<div class="empty">No files yet. Everything you upload here is saved to your account, so you can download it from any device.</div>`}</div>`;
 }
-
 function pageFiles() {
   const total = S.files.reduce((t, f) => t + Number(f.size || 0), 0);
-  return `<h1 class="page">My files</h1><p class="sub">${S.files.length} file${S.files.length === 1 ? "" : "s"} · ${fmtSize(total) || "0 B"} stored. Upload your reports and PPTs so your work is never lost.</p>${filesView(S.files)}`;
+  return `<h1 class="page">My files</h1><p class="sub">${S.files.length} file${S.files.length === 1 ? "" : "s"} · ${fmtSize(total) || "0 B"} of 1 GB used. Upload your reports and PPTs so your work is never lost.</p>${filesView(S.files)}`;
 }
 
 function todoRow(t) {
-  return `<div class="li"><label class="tcheck ${t.done ? "on" : ""}" style="flex:1;padding:2px"><input type="checkbox" data-todo="${t.id}" ${t.done ? "checked" : ""}><span>${esc(t.text)}</span></label><button class="btn sm ghost" data-deltodo="${t.id}" title="Delete">✕</button></div>`;
+  return `<div class="li"><label class="tcheck ${t.done ? "on" : ""}" style="flex:1;padding:2px;min-width:0"><input type="checkbox" data-todo="${t.id}" ${t.done ? "checked" : ""}><span>${esc(t.text)}</span></label><button class="btn sm ghost" data-deltodo="${t.id}" title="Delete">✕</button></div>`;
 }
-
 function pageChecklist() {
   const subs = visibleSubjects();
   const open = S.todos.filter((t) => !t.done), done = S.todos.filter((t) => t.done);
@@ -353,44 +461,187 @@ function pageChecklist() {
     </div>
     <div class="card"><h3>📋 Pending in assessments</h3>
       ${pending.length ? `<div class="list">${pending.map(({ s, k, a, miss }) => `<a class="li" href="#/subject/${s.id}" style="text-decoration:none;color:inherit">
-        <span class="dot" style="--c:${s.color}"></span><div style="flex:1"><b>${esc(s.short)} · ${KIND_LABEL[k]}</b><div class="muted small">${miss.length ? "Still to do: " + miss.map((m) => m === "ppt" ? "PPT" : m[0].toUpperCase() + m.slice(1)).join(", ") : "Mark as done once submitted"}</div></div>${dueLabel(effDue(a))}</a>`).join("")}</div>`
+        <span class="dot" style="--c:${s.color}"></span><div style="flex:1;min-width:0"><b>${esc(s.short)} · ${KIND_LABEL[k]}</b><div class="muted small">${miss.length ? "Still to do: " + miss.map((m) => m === "ppt" ? "PPT" : m[0].toUpperCase() + m.slice(1)).join(", ") : "Mark as done once submitted"}</div></div>${dueLabel(effDue(a))}</a>`).join("")}</div>`
         : `<div class="empty">Started assessments with something left will show here.</div>`}
     </div>
   </div>
   <div class="card" style="margin-top:14px"><h3>📚 Exam prep — syllabus coverage</h3>
-    ${subs.filter((s) => syllabusProgress(s) !== null).map((s) => `<a href="#/subject/${s.id}" data-goto-syl style="display:block;text-decoration:none;color:inherit;margin-bottom:12px">
-      <div class="row between small"><b>${esc(s.name)}</b><span class="muted">${pct(syllabusProgress(s))}% · UA-2 ${fmtDate(s.exam_date, false)}</span></div>
-      <div class="bar" style="--c:${s.color};margin-top:5px"><i style="width:${pct(syllabusProgress(s))}%"></i></div></a>`).join("")}
+    ${subs.filter((s) => syllabusProgress(s) !== null).map((s) => { const ne = examsFor(s.id).filter((e) => e.exam_date && daysUntil(e.exam_date) >= 0).sort((a, b) => dOnly(a.exam_date).localeCompare(dOnly(b.exam_date)))[0]; return `<a href="#/subject/${s.id}" data-goto-syl style="display:block;text-decoration:none;color:inherit;margin-bottom:12px">
+      <div class="row between small"><b class="ellip">${esc(s.name)}</b><span class="muted" style="white-space:nowrap">${pct(syllabusProgress(s))}%${ne ? ` · ${esc(ne.name)} ${fmtDate(ne.exam_date, false)}` : ""}</span></div>
+      <div class="bar" style="--c:${s.color};margin-top:5px"><i style="width:${pct(syllabusProgress(s))}%"></i></div></a>`; }).join("")}
   </div>`;
 }
 
 function pageAssignments() {
-  const p = prefs(), subs = visibleSubjects();
+  const p = prefs();
+  const subs = S.subjects.slice().sort((a, b) => a.sort - b.sort);   // every subject incl. electives
   const open = S.assignments.filter((a) => !a.done), done = S.assignments.filter((a) => a.done);
-  const row = (a) => { const s = subjById(a.subject_id); return `<div class="li">
-    <input type="checkbox" data-asg="${a.id}" ${a.done ? "checked" : ""} style="width:18px;height:18px;accent-color:var(--brand)">
+  const row = (a) => { const s = subjById(a.subject_id); return `<div class="li asg-row">
+    <input type="checkbox" data-asg="${a.id}" ${a.done ? "checked" : ""} title="Mark done" style="width:20px;height:20px;accent-color:var(--brand);flex:none">
     <span class="dot" style="--c:${s?.color || "#64748b"}"></span>
-    <div style="flex:1;min-width:0"><b style="${a.done ? "text-decoration:line-through;color:var(--muted)" : ""}">${esc(a.title)}</b><div class="muted small">${s ? esc(s.short) : "General"}${a.notes ? " · " + esc(a.notes) : ""}</div></div>
-    ${a.done ? "" : dueLabel(a.due_date)}<button class="btn sm ghost" data-delasg="${a.id}">✕</button></div>`; };
-  return `<div class="row between wrap"><div><h1 class="page">Assignments</h1><p class="sub">Optional tracker for regular class assignments.</p></div>
+    <div style="flex:1;min-width:0"><b class="ellip" style="display:block;${a.done ? "text-decoration:line-through;color:var(--muted)" : ""}">${esc(a.title)}</b><div class="muted small">${s ? esc(s.short) : "General"}${a.due_date ? " · due " + fmtDate(a.due_date) : ""}${a.notes ? " · " + esc(a.notes) : ""}</div></div>
+    ${a.done ? "" : dueLabel(a.due_date)}<button class="btn sm danger" data-delasg="${a.id}" title="Delete this assignment">🗑<span class="hide-sm"> Delete</span></button></div>`; };
+  return `<div class="row between wrap"><div><h1 class="page">Assignments</h1><p class="sub">Optional tracker for regular class assignments. Added one by mistake? Tap 🗑 Delete.</p></div>
     <label class="row small" style="font-weight:700;cursor:pointer"><input type="checkbox" id="pinAsg" ${p.showAssignments ? "checked" : ""} style="width:18px;height:18px;accent-color:var(--brand)"> Show as a tab</label></div>
   <div class="card" style="margin-bottom:14px"><form id="asgF" class="grid g4" style="align-items:end">
     <label class="f" style="margin:0"><span>Title</span><input class="in" name="title" required placeholder="Assignment 2 – Hadoop"></label>
-    <label class="f" style="margin:0"><span>Subject</span><select class="in" name="subject_id"><option value="">General</option>${subs.map((s) => `<option value="${s.id}">${esc(s.short)}</option>`).join("")}</select></label>
+    <label class="f" style="margin:0"><span>Subject</span><select class="in" name="subject_id"><option value="">General</option>
+      <optgroup label="Core">${subs.filter((s) => s.kind !== "elective" && !s.owner_id).map((s) => `<option value="${s.id}">${esc(s.short)} — ${esc(s.name)}</option>`).join("")}</optgroup>
+      <optgroup label="Electives">${subs.filter((s) => s.kind === "elective").map((s) => `<option value="${s.id}">${esc(s.short)} — ${esc(s.name)}</option>`).join("")}</optgroup>
+      ${subs.some((s) => s.owner_id) ? `<optgroup label="My subjects">${subs.filter((s) => s.owner_id).map((s) => `<option value="${s.id}">${esc(s.name)}</option>`).join("")}</optgroup>` : ""}
+    </select></label>
     <label class="f" style="margin:0"><span>Due</span><input class="in" type="date" name="due_date"></label>
     <button class="btn primary" style="height:44px">Add assignment</button></form></div>
   <div class="card">${open.length ? `<div class="list">${open.map(row).join("")}</div>` : `<div class="empty">No open assignments.</div>`}
-    ${done.length ? `<details style="margin-top:10px"><summary class="muted small" style="cursor:pointer">Completed (${done.length})</summary><div class="list">${done.map(row).join("")}</div></details>` : ""}</div>`;
+    ${done.length ? `<details style="margin-top:10px" ${done.length < 6 ? "open" : ""}><summary class="muted small" style="cursor:pointer">Completed (${done.length})</summary><div class="list">${done.map(row).join("")}</div>
+      <button class="btn sm danger" id="clearDone" style="margin-top:8px">🗑 Delete all completed</button></details>` : ""}</div>`;
+}
+
+// ---- calendar
+function pageCalendar() {
+  const today = todayISO();
+  if (!calMonth) calMonth = today.slice(0, 7);
+  if (!calSel) calSel = today;
+  const [y, m] = calMonth.split("-").map(Number);
+  const first = new Date(y, m - 1, 1);
+  const startOffset = (first.getDay() + 6) % 7;   // Monday first
+  const daysIn = new Date(y, m, 0).getDate();
+  const items = datedItems();
+  const byDate = {};
+  for (const x of items) (byDate[x.date] ||= []).push(x);
+  const cells = [];
+  for (let i = 0; i < startOffset; i++) cells.push(`<div class="cal-c out"></div>`);
+  for (let d = 1; d <= daysIn; d++) {
+    const iso = `${calMonth}-${String(d).padStart(2, "0")}`;
+    const list = byDate[iso] || [];
+    cells.push(`<button class="cal-c ${iso === today ? "today" : ""} ${iso === calSel ? "sel" : ""} ${list.some((x) => x.type === "exam") ? "has-exam" : ""}" data-day="${iso}">
+      <span class="n">${d}</span>
+      <span class="chips">${list.slice(0, 3).map((x) => `<i style="--c:${x.color || x.s?.color || "#64748b"}" class="t-${x.type}"><em>${esc(x.title)}</em></i>`).join("")}${list.length > 3 ? `<small>+${list.length - 3}</small>` : ""}</span>
+    </button>`);
+  }
+  const sel = byDate[calSel] || [];
+  const monthName = first.toLocaleDateString("en-IN", { month: "long", year: "numeric" });
+  const upcoming = items.filter((x) => x.date >= today).slice(0, 10);
+  const subsOpts = visibleSubjects().map((s) => `<option value="${s.id}">${esc(s.short)}</option>`).join("");
+  return `<div class="row between wrap"><div><h1 class="page">Calendar</h1><p class="sub">Unit assessments, deadlines, assignments and your own events — all in one place.</p></div></div>
+  <div class="cal-layout">
+    <div class="card cal">
+      <div class="cal-head"><button class="btn sm ghost" data-cal="-1" aria-label="Previous month">‹</button><b>${monthName}</b><button class="btn sm ghost" data-cal="1" aria-label="Next month">›</button><button class="btn sm ghost" data-cal="0">Today</button></div>
+      <div class="cal-grid wk">${["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((d) => `<div>${d}</div>`).join("")}</div>
+      <div class="cal-grid">${cells.join("")}</div>
+      <div class="legend small muted"><span><i style="background:var(--brand)"></i>Unit assessment / class event</span><span><i style="background:var(--warn)"></i>Deadline</span><span><i style="background:var(--ok)"></i>My event</span></div>
+    </div>
+    <div class="cal-side">
+      <div class="card"><h3>${fmtDate(calSel)}${calSel === today ? ' <span class="pill brand">Today</span>' : ""}</h3>
+        ${sel.length ? `<div class="list">${sel.map((x) => `<div class="li">
+            <span class="dot" style="--c:${x.color || x.s?.color || "#64748b"}"></span>
+            <div style="flex:1;min-width:0"><div style="font-weight:700">${esc(x.title)}</div><div class="muted small">${TYPE_META[x.type][0]}${x.time ? " · " + esc(x.time) : ""}${x.note ? " · " + esc(x.note) : ""}</div></div>
+            ${x.ev && (x.ev.user_id || S.user.is_admin) ? `<button class="btn sm ghost" data-edit-ev="${x.ev.id}">Edit</button>` : x.href ? `<a class="btn sm ghost" href="${x.href}">Open</a>` : ""}
+          </div>`).join("")}</div>` : `<div class="empty" style="padding:12px">Nothing on this day.</div>`}
+        <form id="evF" style="margin-top:12px;border-top:1px dashed var(--line);padding-top:12px">
+          <b class="small">＋ Add event on ${fmtDate(calSel, false)}</b>
+          <label class="f" style="margin-top:8px"><span>Title</span><input class="in" name="title" required placeholder="e.g. Group meeting for TA3"></label>
+          <div class="two" style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+            <label class="f"><span>Date</span><input class="in" type="date" name="event_date" value="${calSel}" required></label>
+            <label class="f"><span>Time (optional)</span><input class="in" name="event_time" placeholder="10:00 AM"></label>
+          </div>
+          <label class="f"><span>Subject (optional)</span><select class="in" name="subject_id"><option value="">—</option>${subsOpts}</select></label>
+          <label class="f"><span>Note</span><input class="in" name="note" placeholder="Room, what to bring…"></label>
+          ${S.user.is_admin ? `<label class="tcheck" style="padding:4px 0"><input type="checkbox" name="batch"><span>Class event — show to everyone and notify devices</span></label>` : ""}
+          <button class="btn primary">Add event</button>
+        </form>
+      </div>
+      <div class="card"><h3>Next up</h3>${upcoming.length ? `<div class="list">${upcoming.map((x) => itemRow(x)).join("")}</div>` : `<div class="empty">Nothing upcoming.</div>`}</div>
+    </div>
+  </div>`;
+}
+function eventModal(ev) {
+  const subsOpts = visibleSubjects().map((s) => `<option value="${s.id}" ${s.id === ev.subject_id ? "selected" : ""}>${esc(s.short)}</option>`).join("");
+  const bg = document.createElement("div");
+  bg.className = "modal-bg";
+  bg.innerHTML = `<form class="modal" id="evEdit"><h3>${ev.user_id ? "Edit my event" : "Edit class event"}</h3>
+    <label class="f"><span>Title</span><input class="in" name="title" value="${esc(ev.title)}" required></label>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px"><label class="f"><span>Date</span><input class="in" type="date" name="event_date" value="${dOnly(ev.event_date)}" required></label>
+    <label class="f"><span>Time</span><input class="in" name="event_time" value="${esc(ev.event_time || "")}"></label></div>
+    <label class="f"><span>Subject</span><select class="in" name="subject_id"><option value="">—</option>${subsOpts}</select></label>
+    <label class="f"><span>Note</span><textarea class="in" name="note" rows="2">${esc(ev.note || "")}</textarea></label>
+    ${!ev.user_id ? `<label class="tcheck" style="padding:4px 0"><input type="checkbox" name="notify"><span>Notify everyone about this change</span></label>` : ""}
+    <div class="row wrap" style="margin-top:6px"><button class="btn primary">Save</button><button type="button" class="btn ghost" data-close>Cancel</button><button type="button" class="btn danger" data-del style="margin-left:auto">🗑 Delete</button></div></form>`;
+  document.body.appendChild(bg);
+  const close = () => bg.remove();
+  bg.onclick = (e) => { if (e.target === bg) close(); };
+  bg.querySelector("[data-close]").onclick = close;
+  bg.querySelector("[data-del]").onclick = async () => {
+    if (!confirm("Delete this event?")) return;
+    try { await api("DELETE", `event/${ev.id}`); S.events = S.events.filter((x) => x.id !== ev.id); close(); render(); toast("Event deleted"); } catch (e) { toast(e.message, true); }
+  };
+  bg.querySelector("form").onsubmit = async (e) => {
+    e.preventDefault();
+    const fd = Object.fromEntries(new FormData(e.target));
+    try {
+      const r = await api("PUT", `event/${ev.id}`, { ...fd, subject_id: fd.subject_id ? Number(fd.subject_id) : null, notify: !!fd.notify });
+      S.events = S.events.map((x) => (x.id === ev.id ? r.event : x)); close(); calSel = dOnly(r.event.event_date); render(); toast("Saved");
+    } catch (err) { toast(err.message, true); }
+  };
+}
+
+// ---- notifications
+function pushState() {
+  if (!("serviceWorker" in navigator) || !("PushManager" in window) || !("Notification" in window)) {
+    const ios = /iphone|ipad|ipod/i.test(navigator.userAgent);
+    return ios && !navigator.standalone ? "ios" : "unsupported";
+  }
+  if (Notification.permission === "denied") return "denied";
+  return S.pushOn && Notification.permission === "granted" ? "on" : "off";
+}
+function pageNotifications() {
+  const seenBefore = prefs().notifSeen || S.user.created_at;
+  const rem = reminders();
+  const st = pushState();
+  const pushCard = {
+    on: `<div class="row between wrap"><div><b>✅ Device notifications are on</b><div class="muted small">You'll get a reminder around 8 AM and 7 PM when something is due, plus class announcements.</div></div><div class="row"><button class="btn sm ghost" id="pushTest">Send test</button><button class="btn sm ghost" id="pushOff">Turn off</button></div></div>`,
+    off: `<div class="row between wrap"><div><b>🔔 Get reminders on this device</b><div class="muted small">Deadline and exam reminders + class updates, even when the site is closed.</div></div><button class="btn grad" id="pushOn">Turn on notifications</button></div>`,
+    denied: `<b>🔕 Notifications are blocked</b><div class="muted small">Allow notifications for this site in your browser settings, then reload.</div>`,
+    ios: `<b>📱 On iPhone: add to Home Screen first</b><div class="muted small">Tap Share → <b>Add to Home Screen</b>, open Sem 7 from your home screen, then come back here to turn on notifications (iOS 16.4+).</div>`,
+    unsupported: `<b>This browser can't receive push notifications.</b><div class="muted small">Try Chrome, Edge, Firefox or Safari (on iPhone, add to Home Screen first).</div>`,
+  }[st];
+  const groups = [["Overdue", rem.filter((x) => daysUntil(x.date) < 0)], ["Today", rem.filter((x) => daysUntil(x.date) === 0)], ["Tomorrow", rem.filter((x) => daysUntil(x.date) === 1)], ["Coming up", rem.filter((x) => daysUntil(x.date) > 1)]].filter(([, l]) => l.length);
+  setTimeout(() => { if (unreadUpdates().length) savePrefs({ notifSeen: new Date().toISOString() }).then(() => { const b = document.querySelector(".bell b"); const n = badgeCount(); if (b) n ? (b.textContent = n) : b.remove(); }); }, 400);
+  return `<h1 class="page">Notifications</h1><p class="sub">Reminders for what's due, and announcements from the class admin.</p>
+  <div class="card push-card" style="margin-bottom:14px">${pushCard}</div>
+  <div class="grid g2">
+    <div class="card"><h3>⏰ Reminders</h3>
+      ${groups.length ? groups.map(([g, l]) => `<div class="grp"><div class="grp-h">${g}</div><div class="list">${l.map((x) => itemRow(x)).join("")}</div></div>`).join("") : `<div class="empty">Nothing due in the next few days 🎉</div>`}
+    </div>
+    <div class="card"><h3>📣 Announcements &amp; updates</h3>
+      ${S.updates.length ? `<div class="list">${S.updates.slice(0, 40).map((u) => `<div class="li ann ${u.created_at > seenBefore ? "unread" : ""}">
+        <span class="ann-ic">${u.kind === "release" ? "✦" : u.kind === "alert" ? "📌" : "📣"}</span>
+        <div style="flex:1;min-width:0"><div style="font-weight:700">${u.version ? `<span class="pill brand">${esc(u.version)}</span> ` : ""}${esc(u.title)}</div>
+          ${u.body ? `<div class="muted small ann-body">${md(u.body)}</div>` : ""}<div class="muted small">${fmtStamp(u.created_at)}</div></div></div>`).join("")}</div>` : `<div class="empty">No announcements yet.</div>`}
+    </div>
+  </div>`;
+}
+
+function pageUpdates() {
+  const rel = S.updates.filter((u) => u.kind === "release");
+  return `<h1 class="page">Update log</h1><p class="sub">What's new in Sem 7 Tracker, newest first.</p>
+  <div class="timeline">${rel.map((u, i) => `<div class="card tl-item ${i === 0 ? "latest" : ""}">
+    <div class="row between wrap"><div class="row">${u.version ? `<span class="pill brand">${esc(u.version)}</span>` : ""}<b>${esc(u.title)}</b>${i === 0 ? '<span class="pill green">Latest</span>' : ""}</div><span class="muted small">${fmtStamp(u.created_at)}</span></div>
+    ${u.body ? `<div class="md small-md">${md(u.body)}</div>` : ""}</div>`).join("") || `<div class="card empty">No updates yet.</div>`}</div>`;
 }
 
 function pageExams() {
-  const all = S.subjects.filter((s) => s.exam_date).sort((a, b) => dOnly(a.exam_date).localeCompare(dOnly(b.exam_date)) || (a.exam_slot || "").localeCompare(b.exam_slot || ""));
-  const mine = new Set(visibleSubjects().map((s) => s.id));
-  return `<h1 class="page">${EXAM_NAME}</h1><p class="sub">Theory exams for B.Tech CSE 7th semester · ${EXAM_VENUE} · Morning 10:00–11:30, Afternoon 1:30–3:00. From the official date sheet dated 06/11/2026.</p>
-  <div class="card"><div class="scroll"><table class="t"><thead><tr><th>Date</th><th>Shift</th><th>Code</th><th>Subject</th><th>Countdown</th></tr></thead><tbody>
-  ${all.map((s) => `<tr style="${mine.has(s.id) ? "" : "opacity:.5"}"><td><b>${fmtDate(s.exam_date)}</b></td><td>${esc(s.exam_slot || "")}</td><td class="muted">${esc(s.code || "")}</td>
-    <td><span class="row" style="gap:7px"><span class="dot" style="--c:${s.color}"></span>${esc(s.name)}${s.kind === "elective" ? ' <span class="pill">elective</span>' : ""}</span></td><td>${dueLabel(s.exam_date)}</td></tr>`).join("")}
-  </tbody></table></div><p class="muted small">Faded rows are electives you haven't turned on. The four electives share the Tue 8 Dec afternoon slot with BDA — enable yours in <a href="#/settings">Settings</a>. Always double-check with the official notice.</p></div>`;
+  const all = S.exams.slice().sort((a, b) => (dOnly(a.exam_date) || "9999").localeCompare(dOnly(b.exam_date) || "9999") || (a.slot || "").localeCompare(b.slot || ""));
+  const names = [...new Set(all.map((e) => e.name))].sort().reverse();
+  const table = (list) => `<div class="scroll"><table class="t"><thead><tr><th>Date</th><th>Shift / time</th><th>Subject</th><th>Countdown</th></tr></thead><tbody>
+    ${list.map((e) => { const s = subjById(e.subject_id); return `<tr style="${isVisible(s) ? "" : "opacity:.45"}"><td style="white-space:nowrap"><b>${e.exam_date ? fmtDate(e.exam_date) : "TBA"}</b></td><td>${esc(e.slot || "—")}</td>
+      <td><span class="row" style="gap:7px"><span class="dot" style="--c:${s?.color}"></span><span>${esc(s?.name)}${s?.code ? ` <span class="muted small">${esc(s.code)}</span>` : ""}${s?.kind === "elective" ? ' <span class="pill">elective</span>' : ""}${e.note ? `<div class="muted small">${esc(e.note)}</div>` : ""}</span></span></td>
+      <td>${e.exam_date ? dueLabel(e.exam_date) : ""}</td></tr>`; }).join("")}</tbody></table></div>`;
+  return `<h1 class="page">Unit assessments</h1><p class="sub">Theory exams for B.Tech CSE 7th semester · ${EXAM_VENUE}. There are three unit assessments; UA-1 and UA-2 dates for most subjects will be added once available.</p>
+  ${names.map((n) => `<div class="card" style="margin-bottom:14px"><h3>${n === "UA-3" ? "Unit Assessment-3 · Dec 2026" : n === "UA-2" ? "Unit Assessment-2" : n === "UA-1" ? "Unit Assessment-1" : esc(n)}</h3>
+    ${n === "UA-3" ? `<p class="muted small" style="margin-top:-6px">Morning 10:00–11:30 · Afternoon 1:30–3:00 · from the official date sheet (06/11/2026).</p>` : ""}
+    ${table(all.filter((e) => e.name === n))}</div>`).join("")}
+  <p class="muted small">Faded rows are subjects you've hidden or electives you haven't turned on (<a href="#/settings">Settings</a>). Always double-check with the official notice.</p>`;
 }
 
 function pageSettings() {
@@ -407,8 +658,8 @@ function pageSettings() {
     </div>
     <div class="card"><h3>Add your own subject</h3>
       <form id="subF">
-        <div class="two" style="display:grid;grid-template-columns:2fr 1fr;gap:8px"><label class="f"><span>Name</span><input class="in" name="name" required></label><label class="f"><span>Short</span><input class="in" name="short" maxlength="14"></label></div>
-        <div class="two" style="display:grid;grid-template-columns:1fr 1fr 70px;gap:8px"><label class="f"><span>Code</span><input class="in" name="code"></label><label class="f"><span>Exam date</span><input class="in" type="date" name="exam_date"></label><label class="f"><span>Colour</span><input class="in" type="color" name="color" value="#6366f1" style="padding:3px;height:42px"></label></div>
+        <div style="display:grid;grid-template-columns:2fr 1fr;gap:8px"><label class="f"><span>Name</span><input class="in" name="name" required></label><label class="f"><span>Short</span><input class="in" name="short" maxlength="14"></label></div>
+        <div style="display:grid;grid-template-columns:1fr 64px;gap:8px"><label class="f"><span>Code</span><input class="in" name="code"></label><label class="f"><span>Colour</span><input class="in" type="color" name="color" value="#6366f1" style="padding:3px;height:44px"></label></div>
         <button class="btn primary">Add subject</button></form>
       ${custom.length ? `<div class="list" style="margin-top:12px">${custom.map((s) => `<div class="li"><span class="dot" style="--c:${s.color}"></span><div style="flex:1">${esc(s.name)}</div><button class="btn sm danger" data-delsub="${s.id}">Delete</button></div>`).join("")}</div>` : ""}
     </div>
@@ -422,31 +673,86 @@ function pageSettings() {
       <button class="btn primary">Update password</button></form></div>
     <div class="card"><h3>Options</h3>
       <label class="tcheck"><input type="checkbox" id="pinAsg" ${p.showAssignments ? "checked" : ""}><span>Show the Assignments tab in the main menu</span></label>
+      <a class="tcheck" href="#/notifications" style="text-decoration:none;color:inherit"><span>🔔 Device notifications: <b>${{ on: "on", off: "off", denied: "blocked", ios: "add to Home Screen first", unsupported: "not supported" }[pushState()]}</b> →</span></a>
       <div class="row wrap" style="margin-top:10px"><button class="btn ghost" id="expJson2">⤓ Export all my data (JSON)</button><button class="btn ghost" id="expCsv2">⤓ Export tracker (CSV)</button></div>
     </div>
   </div>`;
 }
 
 function pageAdmin() {
-  if (!S.user.is_admin) return `<div class="empty">Admins only.</div>`;
-  const subs = S.subjects.filter((s) => !s.owner_id && (s.kind !== "elective"));
-  return `<h1 class="page">Admin · batch deadlines</h1><p class="sub">Dates and notes you set here appear on everyone's TA / ERLA / PA cards (their own due date overrides it). ${S.batchSize} account${S.batchSize === 1 ? "" : "s"} so far.</p>
-  <div class="card" style="margin-bottom:14px"><form id="dlF" class="grid g4" style="align-items:end">
-    <label class="f" style="margin:0"><span>Subject</span><select class="in" name="subject_id">${subs.map((s) => `<option value="${s.id}">${esc(s.short)}</option>`).join("")}</select></label>
-    <label class="f" style="margin:0"><span>Assessment</span><select class="in" name="kind">${S.kinds.map((k) => `<option value="${k}">${KIND_LABEL[k]}</option>`).join("")}</select></label>
-    <label class="f" style="margin:0"><span>Due date</span><input class="in" type="date" name="due_date"></label>
-    <label class="f" style="margin:0"><span>Note</span><input class="in" name="note" placeholder="Topic / format / faculty note"></label>
-    <button class="btn primary">Save for batch</button><span class="muted small">Leave date and note empty to remove.</span></form></div>
-  <div class="card" style="margin-bottom:14px"><h3>Current batch deadlines</h3>${S.deadlines.length ? `<div class="list">${S.deadlines.slice().sort((a, b) => dOnly(a.due_date).localeCompare(dOnly(b.due_date))).map((d) => { const s = subjById(d.subject_id); return `<div class="li"><span class="dot" style="--c:${s?.color}"></span><div style="flex:1"><b>${esc(s?.short)} · ${KIND_LABEL[d.kind]}</b><div class="muted small">${d.due_date ? fmtDate(d.due_date) : "no date"}${d.note ? " — " + esc(d.note) : ""}</div></div><button class="btn sm danger" data-deldl="${d.subject_id}|${d.kind}">Remove</button></div>`; }).join("")}</div>` : `<div class="empty">None yet.</div>`}</div>
+  if (!S.user.is_admin) return `<div class="empty">This page is only for the class admin.</div>`;
+  const subs = S.subjects.filter((s) => !s.owner_id);
+  const subOpts = (sel) => subs.map((s) => `<option value="${s.id}" ${s.id === sel ? "selected" : ""}>${esc(s.short)}</option>`).join("");
+  return `<h1 class="page">Admin panel</h1><p class="sub">Only you can see this. Everything here is shown to the whole batch. ${S.batchSize} account${S.batchSize === 1 ? "" : "s"} so far.</p>
   <div class="grid g2">
-    <div class="card"><h3>Reset a batchmate's password</h3><form id="rstF">
+    <div class="card"><h3>📣 Post an announcement / update</h3><form id="updF">
+      <div style="display:grid;grid-template-columns:1fr 110px;gap:8px"><label class="f"><span>Title</span><input class="in" name="title" required placeholder="e.g. TA3 submission extended"></label>
+      <label class="f"><span>Type</span><select class="in" name="kind"><option value="notice">Notice</option><option value="release">App update</option></select></label></div>
+      <label class="f"><span>Version (for app updates)</span><input class="in" name="version" placeholder="v2.1"></label>
+      <label class="f"><span>Details</span><textarea class="in" name="body" rows="3" placeholder="- one point per line"></textarea></label>
+      <label class="tcheck" style="padding:4px 0"><input type="checkbox" name="notify" checked><span>Ping everyone's devices</span></label>
+      <button class="btn primary">Post</button></form></div>
+    <div class="card"><h3>📌 Batch deadline (TA / ERLA / PA)</h3><form id="dlF">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+      <label class="f"><span>Subject</span><select class="in" name="subject_id">${subOpts()}</select></label>
+      <label class="f"><span>Assessment</span><select class="in" name="kind">${S.kinds.map((k) => `<option value="${k}">${KIND_LABEL[k]}</option>`).join("")}</select></label></div>
+      <label class="f"><span>Due date</span><input class="in" type="date" name="due_date"></label>
+      <label class="f"><span>Note</span><input class="in" name="note" placeholder="Topic / format / faculty note"></label>
+      <label class="tcheck" style="padding:4px 0"><input type="checkbox" name="notify" checked><span>Ping everyone's devices</span></label>
+      <button class="btn primary">Save for batch</button> <span class="muted small">Empty date + note removes it.</span></form>
+      ${S.deadlines.length ? `<div class="list" style="margin-top:10px">${S.deadlines.slice().sort((a, b) => dOnly(a.due_date).localeCompare(dOnly(b.due_date))).map((d) => { const s = subjById(d.subject_id); return `<div class="li"><span class="dot" style="--c:${s?.color}"></span><div style="flex:1;min-width:0"><b>${esc(s?.short)} · ${KIND_LABEL[d.kind]}</b><div class="muted small">${d.due_date ? fmtDate(d.due_date) : "no date"}${d.note ? " — " + esc(d.note) : ""}</div></div><button class="btn sm danger" data-deldl="${d.subject_id}|${d.kind}">Remove</button></div>`; }).join("")}</div>` : ""}
+    </div>
+  </div>
+  <div class="card" style="margin-top:14px"><h3>◷ Unit assessments (UA-1 / UA-2 / UA-3)</h3>
+    <form id="exF" class="grid g4" style="align-items:end">
+      <label class="f" style="margin:0"><span>Subject</span><select class="in" name="subject_id">${subOpts()}</select></label>
+      <label class="f" style="margin:0"><span>Name</span><select class="in" name="name"><option>UA-1</option><option>UA-2</option><option selected>UA-3</option><option>End-term</option></select></label>
+      <label class="f" style="margin:0"><span>Date</span><input class="in" type="date" name="exam_date"></label>
+      <label class="f" style="margin:0"><span>Shift / time</span><input class="in" name="slot" placeholder="Mon 10:00–11:30 AM"></label>
+      <label class="f" style="margin:0;grid-column:1/-2"><span>Note</span><input class="in" name="note" placeholder="Syllabus / marks / room"></label>
+      <button class="btn primary">Add assessment</button>
+    </form>
+    <div class="scroll" style="margin-top:12px"><table class="t"><thead><tr><th>Subject</th><th>Name</th><th>Date</th><th>Shift</th><th></th></tr></thead><tbody>
+      ${S.exams.slice().sort((a, b) => (dOnly(a.exam_date) || "9").localeCompare(dOnly(b.exam_date) || "9")).map((e) => `<tr><td>${esc(subjById(e.subject_id)?.short)}</td><td>${esc(e.name)}</td><td style="white-space:nowrap">${e.exam_date ? fmtDate(e.exam_date) : "TBA"}</td><td>${esc(e.slot || "")}</td>
+        <td style="white-space:nowrap"><button class="btn sm ghost" data-edit-ex="${e.id}">Edit</button> <button class="btn sm danger" data-del-ex="${e.id}">✕</button></td></tr>`).join("")}
+    </tbody></table></div></div>
+  <div class="grid g2" style="margin-top:14px">
+    <div class="card"><h3>📅 Class events</h3><p class="muted small" style="margin-top:-6px">Add from the <a href="#/calendar">Calendar</a> with "Class event" ticked. Current ones:</p>
+      ${S.events.filter((e) => !e.user_id).length ? `<div class="list">${S.events.filter((e) => !e.user_id).map((e) => `<div class="li"><div style="flex:1;min-width:0"><b>${esc(e.title)}</b><div class="muted small">${fmtDate(e.event_date)}${e.event_time ? " · " + esc(e.event_time) : ""}</div></div><button class="btn sm ghost" data-edit-ev="${e.id}">Edit</button></div>`).join("")}</div>` : `<div class="empty">None.</div>`}
+    </div>
+    <div class="card"><h3>🔑 Reset a batchmate's password</h3><form id="rstF">
       <label class="f"><span>Roll number</span><input class="in" name="roll_no" required></label>
       <label class="f"><span>Temporary password</span><input class="in" name="password" required minlength="6"></label>
       <button class="btn primary">Reset</button></form></div>
-    <div class="card"><h3>Accounts</h3><div id="usersBox"><button class="btn ghost" id="loadUsers">Load list</button></div></div>
-  </div>`;
+  </div>
+  <div class="card" style="margin-top:14px"><h3>👥 Accounts</h3><div id="usersBox"><button class="btn ghost" id="loadUsers">Load list</button></div></div>
+  <div class="card" style="margin-top:14px"><h3>✦ Posted updates</h3><div class="list">${S.updates.slice(0, 30).map((u) => `<div class="li"><div style="flex:1;min-width:0"><b>${u.version ? esc(u.version) + " · " : ""}${esc(u.title)}</b><div class="muted small">${u.kind} · ${fmtStamp(u.created_at)}</div></div><button class="btn sm danger" data-del-upd="${u.id}">✕</button></div>`).join("")}</div></div>`;
+}
+function examModal(e) {
+  const subs = S.subjects.filter((s) => !s.owner_id);
+  const bg = document.createElement("div");
+  bg.className = "modal-bg";
+  bg.innerHTML = `<form class="modal"><h3>Edit unit assessment</h3>
+    <label class="f"><span>Subject</span><select class="in" name="subject_id">${subs.map((s) => `<option value="${s.id}" ${s.id === e.subject_id ? "selected" : ""}>${esc(s.short)}</option>`).join("")}</select></label>
+    <label class="f"><span>Name</span><input class="in" name="name" value="${esc(e.name)}" required></label>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px"><label class="f"><span>Date</span><input class="in" type="date" name="exam_date" value="${dOnly(e.exam_date)}"></label>
+    <label class="f"><span>Shift / time</span><input class="in" name="slot" value="${esc(e.slot || "")}"></label></div>
+    <label class="f"><span>Note</span><input class="in" name="note" value="${esc(e.note || "")}"></label>
+    <label class="tcheck" style="padding:4px 0"><input type="checkbox" name="notify"><span>Notify everyone about this change</span></label>
+    <div class="row" style="margin-top:6px"><button class="btn primary">Save</button><button type="button" class="btn ghost" data-close>Cancel</button></div></form>`;
+  document.body.appendChild(bg);
+  const close = () => bg.remove();
+  bg.onclick = (ev) => { if (ev.target === bg) close(); };
+  bg.querySelector("[data-close]").onclick = close;
+  bg.querySelector("form").onsubmit = async (ev) => {
+    ev.preventDefault();
+    const fd = Object.fromEntries(new FormData(ev.target));
+    try { const r = await api("PUT", `exam/${e.id}`, { ...fd, notify: !!fd.notify }); S.exams = S.exams.map((x) => (x.id === e.id ? r.exam : x)); close(); render(); toast("Saved"); }
+    catch (err) { toast(err.message, true); }
+  };
 }
 
+// ------------------------------------------------------------ render & events
 const saveChains = {};
 function queueSave(sid, kind) {
   const key = sid + ":" + kind;
@@ -463,23 +769,25 @@ function queueSave(sid, kind) {
   });
 }
 
-// ------------------------------------------------------------ render & events
 function render() {
   if (!S) return renderAuth();
-  const pages = { home: pageHome, subjects: pageSubjects, subject: pageSubject, checklist: pageChecklist, files: pageFiles, assignments: pageAssignments, exams: pageExams, settings: pageSettings, admin: pageAdmin };
+  const pages = { home: pageHome, subjects: pageSubjects, subject: pageSubject, checklist: pageChecklist, files: pageFiles, assignments: pageAssignments,
+    exams: pageExams, settings: pageSettings, admin: pageAdmin, calendar: pageCalendar, notifications: pageNotifications, updates: pageUpdates, notes: pageNotes };
+  const y = window.scrollY;
   $app.innerHTML = shell((pages[route] || pageHome)());
   wireShell();
   wirePage();
+  window.scrollTo(0, y);
 }
 
 function wirePage() {
   const main = document.getElementById("main");
+  const on = (sel, fn) => main.querySelectorAll(sel).forEach(fn);
 
-  // sub-tabs
-  main.querySelectorAll("[data-st]").forEach((b) => (b.onclick = () => { subTab = b.dataset.st; render(); }));
+  on("[data-st]", (b) => (b.onclick = () => { subTab = b.dataset.st; render(); }));
 
-  // assessment cards — edits go into local state first, saves run one at a time per card
-  main.querySelectorAll(".as").forEach((card) => {
+  // assessment cards — local state first, saves run one at a time per card
+  on(".as", (card) => {
     const sid = Number(card.dataset.sid), kind = card.dataset.kind;
     const local = () => {
       let a = S.assessments.find((x) => x.subject_id === sid && x.kind === kind);
@@ -495,8 +803,7 @@ function wirePage() {
     });
   });
 
-  // syllabus topics
-  main.querySelectorAll("[data-topic]").forEach((el) => (el.onchange = async () => {
+  on("[data-topic]", (el) => (el.onchange = async () => {
     const sid = Number(el.dataset.sid), key = el.dataset.topic;
     S.topics = S.topics.filter((t) => !(t.subject_id === sid && t.topic_key === key));
     if (el.checked) S.topics.push({ subject_id: sid, topic_key: key });
@@ -504,12 +811,29 @@ function wirePage() {
     try { await api("PUT", "topic", { subject_id: sid, topic_key: key, done: el.checked }); } catch (e) { toast(e.message, true); }
   }));
 
-  // customise columns
   const kf = document.getElementById("kindsF");
   if (kf) kf.onchange = () => {
     const ks = [...kf.querySelectorAll("input:checked")].map((i) => i.value);
     if (!ks.length) return toast("Keep at least one", true);
     savePrefs({ kinds: { ...(prefs().kinds || {}), [routeArg]: ks } });
+  };
+
+  // notes
+  on("[data-toc]", (a) => (a.onclick = (e) => { e.preventDefault(); main.querySelectorAll(".md h3")[Number(a.dataset.toc)]?.scrollIntoView({ behavior: "smooth", block: "start" }); }));
+  const ne = document.getElementById("notesEdit");
+  if (ne) ne.onclick = () => { notesCache._edit = Number(routeArg); render(); };
+  const nc = document.getElementById("notesCancel");
+  if (nc) nc.onclick = () => { notesCache._edit = null; render(); };
+  const ns = document.getElementById("notesSave");
+  if (ns) ns.onclick = async () => {
+    const id = notesCache._edit, v = document.getElementById("notesEd").value;
+    try { await api("PUT", `notes/${id}`, { notes_md: v }); notesCache[id] = { notes_md: v, custom: true }; notesCache._edit = null; const s = subjById(id); if (s) s.has_notes = !!v.trim(); render(); toast("Notes saved"); } catch (e) { toast(e.message, true); }
+  };
+  const nr = document.getElementById("notesReset");
+  if (nr) nr.onclick = async () => {
+    if (!confirm("Reset these notes to the default version?")) return;
+    const id = notesCache._edit;
+    try { await api("PUT", `notes/${id}`, { reset: true }); delete notesCache[id]; notesCache._edit = null; render(); } catch (e) { toast(e.message, true); }
   };
 
   // todos
@@ -518,11 +842,11 @@ function wirePage() {
     e.preventDefault(); const text = qt.text.value.trim(); if (!text) return;
     try { const r = await api("POST", "todo", { text }); S.todos.unshift(r.todo); render(); } catch (err) { toast(err.message, true); }
   };
-  main.querySelectorAll("[data-todo]").forEach((el) => (el.onchange = async () => {
+  on("[data-todo]", (el) => (el.onchange = async () => {
     const t = S.todos.find((x) => x.id === Number(el.dataset.todo)); t.done = el.checked; render();
     try { await api("PUT", `todo/${t.id}`, { done: t.done }); } catch (e) { toast(e.message, true); }
   }));
-  main.querySelectorAll("[data-deltodo]").forEach((el) => (el.onclick = async () => {
+  on("[data-deltodo]", (el) => (el.onclick = async () => {
     const id = Number(el.dataset.deltodo); S.todos = S.todos.filter((t) => t.id !== id); render();
     try { await api("DELETE", `todo/${id}`); } catch (e) { toast(e.message, true); }
   }));
@@ -533,20 +857,57 @@ function wirePage() {
     e.preventDefault(); const fd = Object.fromEntries(new FormData(af));
     try { const r = await api("POST", "assignment", { ...fd, subject_id: fd.subject_id ? Number(fd.subject_id) : null }); S.assignments.push(r.assignment); render(); toast("Added"); } catch (err) { toast(err.message, true); }
   };
-  main.querySelectorAll("[data-asg]").forEach((el) => (el.onchange = async () => {
+  on("[data-asg]", (el) => (el.onchange = async () => {
     const a = S.assignments.find((x) => x.id === Number(el.dataset.asg)); a.done = el.checked; render();
     try { await api("PUT", `assignment/${a.id}`, { ...a, due_date: dOnly(a.due_date) }); } catch (e) { toast(e.message, true); }
   }));
-  main.querySelectorAll("[data-delasg]").forEach((el) => (el.onclick = async () => {
-    if (!confirm("Delete this assignment?")) return;
-    const id = Number(el.dataset.delasg); S.assignments = S.assignments.filter((a) => a.id !== id); render();
-    try { await api("DELETE", `assignment/${id}`); } catch (e) { toast(e.message, true); }
+  on("[data-delasg]", (el) => (el.onclick = async () => {
+    const id = Number(el.dataset.delasg), a = S.assignments.find((x) => x.id === id);
+    if (!confirm(`Delete "${a?.title}"?`)) return;
+    S.assignments = S.assignments.filter((x) => x.id !== id); render();
+    try { await api("DELETE", `assignment/${id}`); toast("Deleted"); } catch (e) { toast(e.message, true); }
   }));
-  const pin = document.getElementById("pinAsg");
-  if (pin) pin.onchange = async () => { await savePrefs({ showAssignments: pin.checked }); render(); };
+  const cd = document.getElementById("clearDone");
+  if (cd) cd.onclick = async () => {
+    const done = S.assignments.filter((a) => a.done);
+    if (!confirm(`Delete ${done.length} completed assignment${done.length > 1 ? "s" : ""}?`)) return;
+    S.assignments = S.assignments.filter((a) => !a.done); render();
+    for (const a of done) { try { await api("DELETE", `assignment/${a.id}`); } catch {} }
+    toast("Cleared");
+  };
+  on("#pinAsg", (pin) => (pin.onchange = async () => { await savePrefs({ showAssignments: pin.checked }); render(); }));
+
+  // calendar
+  on("[data-cal]", (b) => (b.onclick = () => {
+    const d = Number(b.dataset.cal);
+    if (!d) { calMonth = todayISO().slice(0, 7); calSel = todayISO(); }
+    else { const [y, m] = calMonth.split("-").map(Number); const n = new Date(y, m - 1 + d, 1); calMonth = isoOf(n).slice(0, 7); }
+    render();
+  }));
+  on("[data-day]", (b) => (b.onclick = () => { calSel = b.dataset.day; render(); if (innerWidth < 1000) document.querySelector(".cal-side")?.scrollIntoView({ behavior: "smooth" }); }));
+  on("[data-edit-ev]", (b) => (b.onclick = () => { const ev = S.events.find((x) => x.id === Number(b.dataset.editEv)); if (ev) eventModal(ev); }));
+  const evF = document.getElementById("evF");
+  if (evF) evF.onsubmit = async (e) => {
+    e.preventDefault();
+    const fd = Object.fromEntries(new FormData(evF));
+    try {
+      const r = await api("POST", "event", { ...fd, subject_id: fd.subject_id ? Number(fd.subject_id) : null, batch: !!fd.batch });
+      S.events.push(r.event); calSel = dOnly(r.event.event_date); calMonth = calSel.slice(0, 7);
+      if (fd.batch) { try { S.updates = (await api("GET", "bootstrap")).updates; } catch {} }
+      render(); toast("Event added");
+    } catch (err) { toast(err.message, true); }
+  };
+
+  // notifications
+  const pOn = document.getElementById("pushOn");
+  if (pOn) pOn.onclick = enablePush;
+  const pOff = document.getElementById("pushOff");
+  if (pOff) pOff.onclick = disablePush;
+  const pT = document.getElementById("pushTest");
+  if (pT) pT.onclick = async () => { try { const r = await api("POST", "push/test"); toast(r.sent ? "Test sent — check your notifications" : "Couldn't reach this device; try turning notifications off and on", !r.sent); } catch (e) { toast(e.message, true); } };
 
   // files
-  main.querySelectorAll("[data-upload]").forEach((el) => (el.onchange = () => uploadFiles([...el.files], Number(el.dataset.sid), el.dataset.kind, el.closest(".as")?.querySelector("[data-saving]"))));
+  on("[data-upload]", (el) => (el.onchange = () => uploadFiles([...el.files], Number(el.dataset.sid), el.dataset.kind, el.closest(".as")?.querySelector("[data-saving]"))));
   const drop = document.getElementById("drop"), dropIn = document.getElementById("dropIn");
   if (drop) {
     const go = (files) => uploadFiles(files, Number(document.getElementById("upSid").value) || null, document.getElementById("upKind").value || null, document.getElementById("upProg"));
@@ -556,18 +917,18 @@ function wirePage() {
     drop.ondragleave = () => drop.classList.remove("over");
     drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove("over"); go([...e.dataTransfer.files]); };
   }
-  main.querySelectorAll("[data-delfile]").forEach((el) => (el.onclick = async () => {
+  on("[data-delfile]", (el) => (el.onclick = async () => {
     if (!confirm("Delete this file permanently?")) return;
     const id = Number(el.dataset.delfile);
     try { await api("DELETE", `file/${id}`); S.files = S.files.filter((f) => f.id !== id); render(); toast("Deleted"); } catch (e) { toast(e.message, true); }
   }));
 
   // settings
-  main.querySelectorAll("[data-hide]").forEach((el) => (el.onchange = () => {
+  on("[data-hide]", (el) => (el.onchange = () => {
     const h = new Set(prefs().hidden || []); const id = Number(el.dataset.hide);
     el.checked ? h.delete(id) : h.add(id); savePrefs({ hidden: [...h] });
   }));
-  main.querySelectorAll("[data-el]").forEach((el) => (el.onchange = () => {
+  on("[data-el]", (el) => (el.onchange = () => {
     const s = new Set(prefs().electives || []); const id = Number(el.dataset.el);
     el.checked ? s.add(id) : s.delete(id); savePrefs({ electives: [...s] });
   }));
@@ -576,7 +937,7 @@ function wirePage() {
     e.preventDefault();
     try { const r = await api("POST", "subject", Object.fromEntries(new FormData(sf))); S.subjects.push(r.subject); render(); toast("Subject added"); } catch (err) { toast(err.message, true); }
   };
-  main.querySelectorAll("[data-delsub]").forEach((el) => (el.onclick = async () => {
+  on("[data-delsub]", (el) => (el.onclick = async () => {
     if (!confirm("Delete this subject and everything tracked under it?")) return;
     const id = Number(el.dataset.delsub);
     try { await api("DELETE", `subject/${id}`); S.subjects = S.subjects.filter((s) => s.id !== id); S.assessments = S.assessments.filter((a) => a.subject_id !== id); render(); } catch (e) { toast(e.message, true); }
@@ -595,19 +956,41 @@ function wirePage() {
   if (ej) ej.onclick = exportJson; if (ec) ec.onclick = exportCsv;
 
   // admin
+  const refreshUpdates = async () => { try { S.updates = (await api("GET", "bootstrap")).updates; } catch {} };
   const dl = document.getElementById("dlF");
   if (dl) dl.onsubmit = async (e) => {
-    e.preventDefault(); const fd = Object.fromEntries(new FormData(dl)); fd.subject_id = Number(fd.subject_id);
+    e.preventDefault(); const fd = Object.fromEntries(new FormData(dl)); fd.subject_id = Number(fd.subject_id); fd.notify = !!fd.notify;
     try {
       const r = await api("PUT", "deadline", fd);
       S.deadlines = S.deadlines.filter((d) => !(d.subject_id === fd.subject_id && d.kind === fd.kind));
       if (r.deadline) S.deadlines.push(r.deadline);
-      render(); toast("Batch deadline saved");
+      await refreshUpdates(); render(); toast("Batch deadline saved");
     } catch (err) { toast(err.message, true); }
   };
-  main.querySelectorAll("[data-deldl]").forEach((el) => (el.onclick = async () => {
+  on("[data-deldl]", (el) => (el.onclick = async () => {
     const [sid, kind] = el.dataset.deldl.split("|");
     try { await api("PUT", "deadline", { subject_id: Number(sid), kind }); S.deadlines = S.deadlines.filter((d) => !(d.subject_id === Number(sid) && d.kind === kind)); render(); } catch (e) { toast(e.message, true); }
+  }));
+  const exF = document.getElementById("exF");
+  if (exF) exF.onsubmit = async (e) => {
+    e.preventDefault();
+    try { const r = await api("POST", "exam", Object.fromEntries(new FormData(exF))); S.exams.push(r.exam); await refreshUpdates(); render(); toast("Unit assessment added"); } catch (err) { toast(err.message, true); }
+  };
+  on("[data-edit-ex]", (b) => (b.onclick = () => examModal(S.exams.find((x) => x.id === Number(b.dataset.editEx)))));
+  on("[data-del-ex]", (b) => (b.onclick = async () => {
+    if (!confirm("Delete this unit assessment entry?")) return;
+    const id = Number(b.dataset.delEx);
+    try { await api("DELETE", `exam/${id}`); S.exams = S.exams.filter((x) => x.id !== id); render(); } catch (e) { toast(e.message, true); }
+  }));
+  const updF = document.getElementById("updF");
+  if (updF) updF.onsubmit = async (e) => {
+    e.preventDefault(); const fd = Object.fromEntries(new FormData(updF));
+    try { const r = await api("POST", "update", { ...fd, notify: !!fd.notify }); S.updates.unshift(r.update); updF.reset(); render(); toast("Posted"); } catch (err) { toast(err.message, true); }
+  };
+  on("[data-del-upd]", (b) => (b.onclick = async () => {
+    if (!confirm("Delete this update/announcement?")) return;
+    const id = Number(b.dataset.delUpd);
+    try { await api("DELETE", `update/${id}`); S.updates = S.updates.filter((x) => x.id !== id); render(); } catch (e) { toast(e.message, true); }
   }));
   const rf = document.getElementById("rstF");
   if (rf) rf.onsubmit = async (e) => {
@@ -618,9 +1001,44 @@ function wirePage() {
   if (lu) lu.onclick = async () => {
     try {
       const r = await api("GET", "admin/users");
-      document.getElementById("usersBox").innerHTML = `<div class="scroll"><table class="t"><thead><tr><th>Roll</th><th>Name</th><th>Submitted</th><th>Files</th></tr></thead><tbody>${r.users.map((u) => `<tr><td>${esc(u.roll_no)}</td><td>${esc(u.name)}</td><td>${u.submitted}</td><td>${u.files}</td></tr>`).join("")}</tbody></table></div>`;
+      document.getElementById("usersBox").innerHTML = `<div class="scroll"><table class="t"><thead><tr><th>Roll</th><th>Name</th><th>Submitted</th><th>Files</th><th>Joined</th></tr></thead><tbody>${r.users.map((u) => `<tr><td>${esc(u.roll_no)}</td><td>${esc(u.name)}</td><td>${u.submitted}</td><td>${u.files}</td><td class="muted small">${fmtDate(u.created_at, false)}</td></tr>`).join("")}</tbody></table></div>`;
     } catch (e) { toast(e.message, true); }
   };
+}
+
+// ------------------------------------------------------------ push notifications
+function urlB64ToUint8(b64) { const p = "=".repeat((4 - (b64.length % 4)) % 4); const raw = atob((b64 + p).replace(/-/g, "+").replace(/_/g, "/")); return Uint8Array.from([...raw].map((c) => c.charCodeAt(0))); }
+async function swReg() { return navigator.serviceWorker.register("/sw.js"); }
+async function enablePush() {
+  try {
+    if (!S.pushKey) return toast("Notifications aren't set up on the server yet", true);
+    const perm = await Notification.requestPermission();
+    if (perm !== "granted") { render(); return toast("Notifications weren't allowed", true); }
+    const reg = await swReg(); await navigator.serviceWorker.ready;
+    let sub = await reg.pushManager.getSubscription();
+    if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlB64ToUint8(S.pushKey) });
+    await api("POST", "push/subscribe", sub.toJSON());
+    S.pushOn = true; render();
+    try { await api("POST", "push/test"); } catch {}
+    toast("Notifications on 🔔");
+  } catch (e) { toast("Couldn't turn on notifications: " + e.message, true); }
+}
+async function disablePush() {
+  try {
+    const reg = await navigator.serviceWorker.getRegistration();
+    const sub = await reg?.pushManager.getSubscription();
+    if (sub) { await api("POST", "push/unsubscribe", { endpoint: sub.endpoint }); await sub.unsubscribe(); }
+    S.pushOn = false; render(); toast("Notifications off on this device");
+  } catch (e) { toast(e.message, true); }
+}
+async function syncPush() {   // keep server subscription fresh for devices already allowed
+  try {
+    if (!("serviceWorker" in navigator) || !("PushManager" in window)) return;
+    const reg = await swReg();
+    if (Notification.permission !== "granted" || !S.pushKey) return;
+    const sub = await reg.pushManager.getSubscription();
+    if (sub) { await api("POST", "push/subscribe", sub.toJSON()); if (!S.pushOn) { S.pushOn = true; if (route === "notifications") render(); } }
+  } catch {}
 }
 
 // ------------------------------------------------------------ uploads
@@ -635,16 +1053,6 @@ function xhrPut(url, file, type, onProgress) {
     x.send(file);
   });
 }
-async function sendFile(file, sid, kind, onProgress) {
-  const type = file.type || "application/octet-stream";
-  const t = await api("POST", "upload-url", { name: file.name, size: file.size, type, subject_id: sid, kind });
-  try { await xhrPut(t.url, file, t.type, onProgress); }
-  catch (e) {
-    if (e.message === "network" && file.size < 9 * 1024 * 1024) return putFile(file, sid, kind, onProgress); // fallback via server
-    throw new Error(e.message === "network" ? "Network error" : e.message);
-  }
-  return api("POST", "upload-done", { key: t.key, type: t.type, subject_id: sid, kind });
-}
 function putFile(file, sid, kind, onProgress) {
   return new Promise((resolve, reject) => {
     const qs = new URLSearchParams({ name: file.name });
@@ -658,6 +1066,16 @@ function putFile(file, sid, kind, onProgress) {
     x.onerror = () => reject(new Error("Network error"));
     x.send(file);
   });
+}
+async function sendFile(file, sid, kind, onProgress) {
+  const type = file.type || "application/octet-stream";
+  const t = await api("POST", "upload-url", { name: file.name, size: file.size, type, subject_id: sid, kind });
+  try { await xhrPut(t.url, file, t.type, onProgress); }
+  catch (e) {
+    if (e.message === "network" && file.size < 9 * 1024 * 1024) return putFile(file, sid, kind, onProgress);
+    throw new Error(e.message === "network" ? "Network error" : e.message);
+  }
+  return api("POST", "upload-done", { key: t.key, type: t.type, subject_id: sid, kind });
 }
 async function uploadFiles(files, sid, kind, statusEl) {
   if (!files.length) return;
@@ -677,12 +1095,13 @@ async function uploadFiles(files, sid, kind, statusEl) {
 // ------------------------------------------------------------ export
 function exportJson() {
   const out = { exported_at: new Date().toISOString(), user: { name: S.user.name, roll_no: S.user.roll_no, section: S.user.section },
-    subjects: visibleSubjects().map((s) => ({ name: s.name, code: s.code, exam_date: dOnly(s.exam_date),
+    subjects: visibleSubjects().map((s) => ({ name: s.name, code: s.code, unit_assessments: examsFor(s.id).map((e) => ({ name: e.name, date: dOnly(e.exam_date), slot: e.slot })),
       assessments: kindsFor(s.id).map((k) => { const a = getA(s.id, k); return { kind: k, topic: a.topic, due_date: effDue(a), report: a.report, ppt: a.ppt, viva: a.viva, submitted: a.submitted, marks: a.marks, max_marks: a.max_marks, notes: a.notes }; }),
       syllabus_done: (s.units || []).flatMap((u, i) => u.topics.filter((_, j) => topicDone(s.id, `${i}.${j}`))),
     })),
     todos: S.todos.map((t) => ({ text: t.text, done: t.done })),
     assignments: S.assignments.map((a) => ({ title: a.title, subject: subjById(a.subject_id)?.short || null, due_date: dOnly(a.due_date), done: a.done, notes: a.notes })),
+    my_events: S.events.filter((e) => e.user_id).map((e) => ({ title: e.title, date: dOnly(e.event_date), time: e.event_time, note: e.note })),
     files: S.files.map((f) => ({ name: f.name, subject: subjById(f.subject_id)?.short || null, for: f.kind, size: f.size, download: location.origin + "/api/file/" + f.id + "?download=1" })) };
   download(`sem7-tracker-${S.user.roll_no}.json`, JSON.stringify(out, null, 2));
 }
@@ -702,9 +1121,15 @@ function parseRoute() {
   const prev = route + routeArg;
   route = parts[0] || "home"; routeArg = parts[1] || null;
   if (prev !== route + routeArg && route === "subject") { subTab = nextSubTab || "assess"; nextSubTab = null; }
+  if (prev !== route + routeArg) notesCache._edit = null;
 }
 window.addEventListener("hashchange", () => { parseRoute(); if (S) { render(); window.scrollTo(0, 0); } });
-document.addEventListener("click", (e) => { const a = e.target.closest("[data-goto-syl]"); if (a) nextSubTab = "syllabus"; }, true);
+document.addEventListener("click", (e) => { const a = e.target.closest("[data-goto-syl]"); if (a) nextSubTab = "syllabus"; const c = e.target.closest("[data-cal-date]"); if (c) { calSel = c.dataset.calDate; calMonth = calSel.slice(0, 7); } }, true);
+document.addEventListener("visibilitychange", async () => {   // refresh when coming back to the tab
+  if (document.visibilityState !== "visible" || !S || document.querySelector(".modal-bg") || document.activeElement?.matches("input,textarea")) return;
+  if (Date.now() - (boot._at || 0) < 60000) return;
+  try { const n = await api("GET", "bootstrap"); Object.assign(S, n); boot._at = Date.now(); render(); } catch {}
+});
 
 async function boot() {
   document.documentElement.dataset.theme = localStorage.getItem("theme") || "light";
@@ -713,8 +1138,9 @@ async function boot() {
     const me = await api("GET", "me");
     if (!me.user) { S = null; return renderAuth(); }
     S = await api("GET", "bootstrap");
-    for (const k of ["subjects", "assessments", "assignments", "todos", "files"]) S[k].forEach((x) => { for (const n of ["marks", "max_marks", "size"]) if (x[n] != null) x[n] = Number(x[n]); });
+    boot._at = Date.now();
     render();
+    syncPush();
   } catch (e) {
     $app.innerHTML = `<div class="boot"><div class="card" style="max-width:380px;text-align:center"><b>Couldn't load</b><p class="muted">${esc(e.message)}</p><button class="btn primary" onclick="location.reload()">Retry</button></div></div>`;
   }

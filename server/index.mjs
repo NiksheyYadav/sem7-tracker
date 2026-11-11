@@ -2,7 +2,8 @@
 import pg from "pg";
 import crypto from "node:crypto";
 import { AwsClient } from "aws4fetch";
-import { INDEX_HTML, APP_JS, STYLE_CSS } from "./assets.gen.mjs";
+import * as webpush from "web-push";
+import { INDEX_HTML, APP_JS, STYLE_CSS, SW_JS, NOTES, ICONS } from "./assets.gen.mjs";
 
 // keep DATE columns as plain 'YYYY-MM-DD' strings, numerics as numbers
 pg.types.setTypeParser(1082, (v) => v);
@@ -100,6 +101,7 @@ async function currentUser(req) {
       if (payload) u = (await q("select id, roll_no, name, section, is_admin, prefs, created_at from users where id=$1", [payload.uid]))[0] || null;
     } catch { u = null; }
   }
+  if (u) u.is_admin = ADMIN_ROLLS().includes(u.roll_no);
   req._user = u;
   return u;
 }
@@ -128,6 +130,111 @@ function throttle(key) {
   if (a.n > 12) throw new HttpError(429, "Too many attempts — wait a few minutes");
 }
 
+async function needAdmin(req) {
+  const u = await needUser(req);
+  if (!u.is_admin) throw new HttpError(403, "Admins only");
+  return u;
+}
+const fmtD = (iso) => new Date(iso + "T00:00:00Z").toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "short", timeZone: "UTC" });
+function cleanEvent(b) {
+  const title = str(b.title, 150)?.trim();
+  if (!title) bad("Enter a title");
+  const d = dateOrNull(b.event_date);
+  if (!d) bad("Pick a date");
+  return { title, event_date: d, event_time: str(b.event_time, 40)?.trim() || null, note: str(b.note, 1000) || null,
+    subject_id: numOrNull(b.subject_id), color: /^#[0-9a-f]{6}$/i.test(b.color || "") ? b.color : null };
+}
+function cleanExam(b) {
+  const name = str(b.name, 40)?.trim();
+  if (!name) bad("Enter a name like UA-1");
+  if (!numOrNull(b.subject_id)) bad("Pick a subject");
+  return { subject_id: Number(b.subject_id), name, exam_date: dateOrNull(b.exam_date), slot: str(b.slot, 60)?.trim() || null, note: str(b.note, 500) || null };
+}
+
+// ---------------------------------------------------------------- push notifications
+const VAPID_PUBLIC = process.env.VAPID_PUBLIC || "";
+if (VAPID_PUBLIC && process.env.VAPID_PRIVATE) webpush.setVapidDetails(process.env.VAPID_SUBJECT || "mailto:admin@example.com", VAPID_PUBLIC, process.env.VAPID_PRIVATE);
+async function sendTo(sub, payload) {
+  try {
+    await webpush.sendNotification({ endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } }, JSON.stringify(payload), { TTL: 60 * 60 * 12 });
+    return true;
+  } catch (e) {
+    if (e.statusCode === 404 || e.statusCode === 410) await q("delete from push_subs where endpoint=$1", [sub.endpoint]);
+    else console.error("push failed", e.statusCode, e.body || e.message);
+    return false;
+  }
+}
+async function sendMany(subs, payload) {
+  let n = 0;
+  for (let i = 0; i < subs.length; i += 25) {
+    const r = await Promise.all(subs.slice(i, i + 25).map((s) => sendTo(s, payload)));
+    n += r.filter(Boolean).length;
+  }
+  return n;
+}
+async function pushToUser(uid, payload) {
+  if (!VAPID_PUBLIC) return 0;
+  return sendMany(await q("select * from push_subs where user_id=$1", [uid]), payload);
+}
+async function broadcast(payload) {
+  if (!VAPID_PUBLIC) return 0;
+  return sendMany(await q("select * from push_subs"), payload);
+}
+async function announce(title, body, notify, url) {
+  await q("insert into updates (title, body, kind) values ($1,$2,'alert')", [title.slice(0, 200), (body || "").slice(0, 2000)]);
+  if (notify) await broadcast({ title, body: (body || "").slice(0, 180), url: url || "/#/notifications" });
+}
+
+// scheduled reminders: called by a Neon cron trigger at ~8:00 and ~19:00 IST
+async function runReminders(scheduledAt) {
+  const now = scheduledAt ? new Date(scheduledAt) : new Date();
+  const ist = new Date(now.getTime() + 330 * 60000);
+  const today = ist.toISOString().slice(0, 10);
+  const tomorrow = new Date(ist.getTime() + 86400000).toISOString().slice(0, 10);
+  const morning = ist.getUTCHours() < 14;
+  const dates = morning ? [today, tomorrow] : [tomorrow];
+  const users = await q("select u.id, u.prefs from users u where exists (select 1 from push_subs p where p.user_id=u.id)");
+  if (!users.length) return { users: 0, sent: 0 };
+  const [subjects, exams, deadlines, events] = await Promise.all([
+    q("select id, short, kind, owner_id from subjects"),
+    q("select * from exams where exam_date = any($1::date[])", [dates]),
+    q("select * from batch_deadlines where due_date = any($1::date[])", [dates]),
+    q("select * from events where event_date = any($1::date[])", [dates]),
+  ]);
+  const sById = Object.fromEntries(subjects.map((x) => [x.id, x]));
+  let sent = 0;
+  for (const u of users) {
+    const p = u.prefs || {}, hidden = new Set(p.hidden || []), el = new Set(p.electives || []);
+    const visible = (sid) => { const s = sById[sid]; if (!s) return false; if (s.owner_id) return s.owner_id === u.id; return s.kind === "elective" ? el.has(s.id) : !hidden.has(s.id); };
+    const [mine, asg] = await Promise.all([
+      q("select subject_id, kind, due_date, submitted, topic from assessments where user_id=$1", [u.id]),
+      q("select title, due_date from assignments where user_id=$1 and not done and due_date = any($2::date[])", [u.id, dates]),
+    ]);
+    const items = [];
+    const when = (d) => (d === today ? "Today" : "Tomorrow");
+    for (const e of exams) if (visible(e.subject_id)) items.push([e.exam_date, `${sById[e.subject_id].short} ${e.name} exam${e.slot ? " (" + e.slot + ")" : ""}`]);
+    for (const e of events) if ((e.user_id === null || e.user_id === u.id) && (!e.subject_id || e.user_id || visible(e.subject_id))) items.push([e.event_date, e.title + (e.event_time ? " · " + e.event_time : "")]);
+    const mineMap = Object.fromEntries(mine.map((a) => [a.subject_id + ":" + a.kind, a]));
+    for (const a of mine) if (a.due_date && dates.includes(a.due_date) && !a.submitted && visible(a.subject_id)) items.push([a.due_date, `${sById[a.subject_id]?.short} ${a.kind}${a.topic ? " — " + a.topic : ""} due`]);
+    for (const d of deadlines) {
+      const a = mineMap[d.subject_id + ":" + d.kind];
+      if (!visible(d.subject_id) || a?.submitted || a?.due_date) continue;
+      items.push([d.due_date, `${sById[d.subject_id]?.short} ${d.kind} due${d.note ? " — " + d.note : ""}`]);
+    }
+    for (const a of asg) items.push([a.due_date, `Assignment: ${a.title}`]);
+    if (!items.length) continue;
+    const key = `rem:${today}:${morning ? "am" : "pm"}`;
+    const ins = await q("insert into push_log (user_id, key) values ($1,$2) on conflict do nothing returning key", [u.id, key]);
+    if (!ins.length) continue;
+    items.sort((x, y) => x[0].localeCompare(y[0]));
+    const lines = items.slice(0, 5).map(([d, t]) => `${when(d)}: ${t}`);
+    if (items.length > 5) lines.push(`+${items.length - 5} more`);
+    const title = items.some(([d]) => d === today) ? `⏰ ${items.length} thing${items.length > 1 ? "s" : ""} due soon` : `📅 Tomorrow: ${items.length} thing${items.length > 1 ? "s" : ""} due`;
+    sent += await pushToUser(u.id, { title, body: lines.join("\n"), url: "/#/calendar" });
+  }
+  return { users: users.length, sent };
+}
+
 // ---------------------------------------------------------------- routes  (c = {req, body, url})
 const routes = {
   "POST auth/signup": async ({ body: b }) => {
@@ -140,8 +247,9 @@ const routes = {
     if ((await q("select 1 from users where roll_no=$1", [roll])).length) bad("This roll number already has an account — log in instead");
     const rows = await q(
       "insert into users (roll_no, name, section, password_hash, is_admin) values ($1,$2,$3,$4,$5) returning id, roll_no, name, section, is_admin, prefs",
-      [roll, name, str(b.section, 20), await bcrypt.hash(pw, 10), ADMIN_ROLLS().includes(roll)]
+      [roll, name, str(b.section, 20), await bcrypt.hash(pw, 10), false]
     );
+    rows[0].is_admin = ADMIN_ROLLS().includes(roll);
     return json({ user: rows[0] }, 200, { "set-cookie": sessionCookie(await issue(rows[0]), 60 * 86400) });
   },
 
@@ -152,6 +260,7 @@ const routes = {
     if (!u || !(await bcrypt.compare(String(b.password || ""), u.password_hash))) bad("Wrong roll number or password");
     attempts.delete("login:" + roll);
     delete u.password_hash;
+    u.is_admin = ADMIN_ROLLS().includes(u.roll_no);
     return json({ user: u }, 200, { "set-cookie": sessionCookie(await issue(u), 60 * 86400) });
   },
 
@@ -186,8 +295,9 @@ const routes = {
 
   "GET bootstrap": async ({ req }) => {
     const u = await needUser(req);
-    const [subjects, deadlines, assessments, assignments, todos, topics, files, batch] = await Promise.all([
-      q("select * from subjects where owner_id is null or owner_id=$1 order by sort, id", [u.id]),
+    const [subjects, deadlines, assessments, assignments, todos, topics, files, batch, exams, events, updates, subs] = await Promise.all([
+      q(`select id, code, name, short, credits, kind, is_default, units, color, owner_id, sort, (notes_md is not null) as has_db_notes
+         from subjects where owner_id is null or owner_id=$1 order by sort, id`, [u.id]),
       q("select * from batch_deadlines"),
       q("select * from assessments where user_id=$1", [u.id]),
       q("select * from assignments where user_id=$1 order by done, due_date nulls last, id", [u.id]),
@@ -195,8 +305,14 @@ const routes = {
       q("select subject_id, topic_key from topic_progress where user_id=$1 and done", [u.id]),
       q("select id, subject_id, kind, name, size, content_type, created_at from files where user_id=$1 order by created_at desc", [u.id]),
       q("select count(*)::int as n from users"),
+      q("select * from exams order by exam_date nulls last, id"),
+      q("select * from events where user_id is null or user_id=$1 order by event_date, id", [u.id]),
+      q("select id, version, title, body, kind, created_at from updates order by created_at desc limit 80"),
+      q("select count(*)::int n from push_subs where user_id=$1", [u.id]),
     ]);
-    return json({ user: u, subjects, deadlines, assessments, assignments, todos, topics, files, kinds: KINDS, batchSize: batch[0].n });
+    for (const s of subjects) { s.has_notes = s.has_db_notes || !!NOTES[s.code]; delete s.has_db_notes; }
+    return json({ user: u, subjects, deadlines, assessments, assignments, todos, topics, files, exams, events, updates,
+      kinds: KINDS, batchSize: batch[0].n, pushKey: VAPID_PUBLIC, pushOn: subs[0].n > 0 });
   },
 
   "PUT assessment": async ({ req, body: b }) => {
@@ -351,7 +467,108 @@ const routes = {
     return json({ ok: true });
   },
 
+  // ---- study notes
+  "GET notes": async ({ req }, id) => {
+    const u = await needUser(req);
+    const s = (await q("select id, code, name, notes_md from subjects where id=$1 and (owner_id is null or owner_id=$2)", [id, u.id]))[0];
+    if (!s) throw new HttpError(404, "Subject not found");
+    return json({ notes_md: s.notes_md ?? NOTES[s.code] ?? "", custom: s.notes_md != null });
+  },
+  "PUT notes": async ({ req, body: b }, id) => {
+    await needAdmin(req);
+    const md = b.reset ? null : String(b.notes_md ?? "").slice(0, 200000);
+    await q("update subjects set notes_md=$1 where id=$2 and owner_id is null", [md, id]);
+    return json({ ok: true });
+  },
+
+  // ---- calendar events (personal; batch ones by admin)
+  "POST event": async ({ req, body: b }) => {
+    const u = await needUser(req);
+    const ev = cleanEvent(b);
+    if (b.batch && !u.is_admin) throw new HttpError(403, "Only admins can add batch events");
+    if (ev.subject_id) await subjectVisibleTo(u, ev.subject_id);
+    if (!b.batch && (await q("select count(*)::int n from events where user_id=$1", [u.id]))[0].n >= 1000) bad("Too many events");
+    const rows = await q("insert into events (user_id, subject_id, title, event_date, event_time, note, color) values ($1,$2,$3,$4,$5,$6,$7) returning *",
+      [b.batch ? null : u.id, ev.subject_id, ev.title, ev.event_date, ev.event_time, ev.note, ev.color]);
+    if (b.batch) await announce(`New: ${ev.title}`, `${fmtD(ev.event_date)}${ev.event_time ? " · " + ev.event_time : ""}${ev.note ? "\n" + ev.note : ""}`, b.notify !== false, "/#/calendar");
+    return json({ event: rows[0] });
+  },
+  "PUT event": async ({ req, body: b }, id) => {
+    const u = await needUser(req);
+    const cur = (await q("select * from events where id=$1", [id]))[0];
+    if (!cur || (cur.user_id ? cur.user_id !== u.id : !u.is_admin)) throw new HttpError(404, "Event not found");
+    const ev = cleanEvent(b);
+    if (ev.subject_id) await subjectVisibleTo(u, ev.subject_id);
+    const rows = await q("update events set subject_id=$1, title=$2, event_date=$3, event_time=$4, note=$5, color=$6, updated_at=now() where id=$7 returning *",
+      [ev.subject_id, ev.title, ev.event_date, ev.event_time, ev.note, ev.color, id]);
+    if (!cur.user_id && b.notify) await announce(`Updated: ${ev.title}`, `${fmtD(ev.event_date)}${ev.event_time ? " · " + ev.event_time : ""}`, true, "/#/calendar");
+    return json({ event: rows[0] });
+  },
+  "DELETE event": async ({ req }, id) => {
+    const u = await needUser(req);
+    if (u.is_admin) await q("delete from events where id=$1 and (user_id is null or user_id=$2)", [id, u.id]);
+    else await q("delete from events where id=$1 and user_id=$2", [id, u.id]);
+    return json({ ok: true });
+  },
+
+  // ---- push notifications
+  "POST push/subscribe": async ({ req, body: b }) => {
+    const u = await needUser(req);
+    const ep = String(b.endpoint || ""), p256dh = String(b.keys?.p256dh || ""), auth = String(b.keys?.auth || "");
+    if (!/^https:\/\//.test(ep) || !p256dh || !auth) bad("Bad subscription");
+    await q(`insert into push_subs (endpoint, user_id, p256dh, auth) values ($1,$2,$3,$4)
+      on conflict (endpoint) do update set user_id=excluded.user_id, p256dh=excluded.p256dh, auth=excluded.auth`, [ep.slice(0, 1000), u.id, p256dh.slice(0, 200), auth.slice(0, 100)]);
+    return json({ ok: true });
+  },
+  "POST push/unsubscribe": async ({ req, body: b }) => {
+    const u = await needUser(req);
+    await q("delete from push_subs where endpoint=$1 and user_id=$2", [String(b.endpoint || ""), u.id]);
+    return json({ ok: true });
+  },
+  "POST push/test": async ({ req }) => {
+    const u = await needUser(req);
+    const n = await pushToUser(u.id, { title: "Notifications are on ✅", body: "You'll get deadline reminders and class updates here.", url: "/#/notifications" });
+    return json({ sent: n });
+  },
+
   // ---- admin
+  "POST exam": async ({ req, body: b }) => {
+    await needAdmin(req);
+    const ex = cleanExam(b);
+    const rows = await q("insert into exams (subject_id, name, exam_date, slot, note) values ($1,$2,$3,$4,$5) returning *", [ex.subject_id, ex.name, ex.exam_date, ex.slot, ex.note]);
+    const s = (await q("select short from subjects where id=$1", [ex.subject_id]))[0];
+    await announce(`${s?.short || ""} ${ex.name} scheduled`, `${ex.exam_date ? fmtD(ex.exam_date) : "Date TBA"}${ex.slot ? " · " + ex.slot : ""}`, b.notify !== false, "/#/exams");
+    return json({ exam: rows[0] });
+  },
+  "PUT exam": async ({ req, body: b }, id) => {
+    await needAdmin(req);
+    const ex = cleanExam(b);
+    const rows = await q("update exams set subject_id=$1, name=$2, exam_date=$3, slot=$4, note=$5, updated_at=now() where id=$6 returning *", [ex.subject_id, ex.name, ex.exam_date, ex.slot, ex.note, id]);
+    if (b.notify) {
+      const s = (await q("select short from subjects where id=$1", [ex.subject_id]))[0];
+      await announce(`${s?.short || ""} ${ex.name} updated`, `${ex.exam_date ? fmtD(ex.exam_date) : "Date TBA"}${ex.slot ? " · " + ex.slot : ""}`, true, "/#/exams");
+    }
+    return json({ exam: rows[0] });
+  },
+  "DELETE exam": async ({ req }, id) => {
+    await needAdmin(req);
+    await q("delete from exams where id=$1", [id]);
+    return json({ ok: true });
+  },
+  "POST update": async ({ req, body: b }) => {
+    await needAdmin(req);
+    const title = str(b.title, 200)?.trim();
+    if (!title) bad("Enter a title");
+    const kind = b.kind === "release" ? "release" : "notice";
+    const rows = await q("insert into updates (version, title, body, kind) values ($1,$2,$3,$4) returning *", [str(b.version, 20) || null, title, str(b.body, 5000), kind]);
+    if (b.notify !== false) await broadcast({ title, body: String(b.body || "").replace(/^[-*]\s*/gm, "• ").slice(0, 180), url: kind === "release" ? "/#/updates" : "/#/notifications" });
+    return json({ update: rows[0] });
+  },
+  "DELETE update": async ({ req }, id) => {
+    await needAdmin(req);
+    await q("delete from updates where id=$1", [id]);
+    return json({ ok: true });
+  },
   "PUT deadline": async ({ req, body: b }) => {
     const u = await needUser(req);
     if (!u.is_admin) throw new HttpError(403, "Only admins can set batch deadlines");
@@ -363,6 +580,8 @@ const routes = {
     const rows = await q(`insert into batch_deadlines (subject_id, kind, due_date, note) values ($1,$2,$3,$4)
       on conflict (subject_id, kind) do update set due_date=excluded.due_date, note=excluded.note, updated_at=now() returning *`,
       [b.subject_id, b.kind, dateOrNull(b.due_date), str(b.note, 300)]);
+    const sj = (await q("select short from subjects where id=$1", [b.subject_id]))[0];
+    await announce(`${sj?.short || ""} ${b.kind.replace(/(\d)/, " $1")}: ${b.due_date ? "due " + fmtD(b.due_date) : "update"}`, str(b.note, 300) || "", b.notify !== false, "/#/subject/" + b.subject_id);
     return json({ deadline: rows[0] });
   },
   "POST admin/reset": async ({ req, body: b }) => {
@@ -386,7 +605,14 @@ const routes = {
 const STATIC = {
   "/app.js": [APP_JS, "text/javascript; charset=utf-8"],
   "/style.css": [STYLE_CSS, "text/css; charset=utf-8"],
+  "/sw.js": [SW_JS, "text/javascript; charset=utf-8", "no-cache"],
+  "/manifest.webmanifest": [JSON.stringify({
+    name: "Sem 7 Tracker", short_name: "Sem 7", start_url: "/#/home", scope: "/", display: "standalone",
+    background_color: "#f6f5fb", theme_color: "#4f46e5",
+    icons: [{ src: "/icon-192.png", sizes: "192x192", type: "image/png" }, { src: "/icon-512.png", sizes: "512x512", type: "image/png", purpose: "any maskable" }],
+  }), "application/manifest+json"],
 };
+const ICON_BUF = Object.fromEntries(Object.entries(ICONS).map(([k, v]) => [k, Buffer.from(v, "base64")]));
 const SEC_HEADERS = { "x-content-type-options": "nosniff", "referrer-policy": "same-origin", "x-frame-options": "DENY" };
 
 export default async function handler(req) {
@@ -395,8 +621,16 @@ export default async function handler(req) {
 
   if (!p.startsWith("/api/")) {
     if (STATIC[p]) {
-      const [body, type] = STATIC[p];
-      return new Response(body, { headers: { "content-type": type, "cache-control": "public, max-age=300", ...SEC_HEADERS } });
+      const [body, type, cache] = STATIC[p];
+      return new Response(body, { headers: { "content-type": type, "cache-control": cache || "public, max-age=300", ...SEC_HEADERS } });
+    }
+    if (ICON_BUF[p]) return new Response(ICON_BUF[p], { headers: { "content-type": "image/png", "cache-control": "public, max-age=86400" } });
+    if (p === "/cron/remind" && req.method === "POST") {
+      if (!req.headers.get("x-neon-trigger-invocation-id")) return json({ error: "not a trigger call" }, 401);
+      let data = {};
+      try { data = (await req.json()).data || {}; } catch {}
+      try { const r = await runReminders(data.scheduled_at); console.log("reminders", data.scheduled_at, JSON.stringify(r)); return json(r); }
+      catch (e) { console.error("reminders failed", e); return json({ error: e.message }, 500); }
     }
     if (p === "/favicon.ico") return new Response(null, { status: 204 });
     const html = INDEX_HTML.replace('/style.css"', `/style.css?v=${STATIC_VER}"`).replace('/app.js"', `/app.js?v=${STATIC_VER}"`);
