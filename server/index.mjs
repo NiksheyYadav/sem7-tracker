@@ -137,6 +137,18 @@ async function needAdmin(req) {
 }
 const fmtD = (iso) => new Date(iso + "T00:00:00Z").toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "short", timeZone: "UTC" });
 // one-line user text: strip control chars / zero-width / bidi tricks, collapse spaces, cap length (by characters, emoji-safe)
+const MIME = { pdf: "application/pdf", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", svg: "image/svg+xml",
+  mp4: "video/mp4", webm: "video/webm", mov: "video/quicktime", mp3: "audio/mpeg", wav: "audio/wav", m4a: "audio/mp4", txt: "text/plain", md: "text/markdown", csv: "text/csv",
+  json: "application/json", py: "text/x-python", js: "text/javascript", java: "text/x-java", c: "text/x-c", cpp: "text/x-c++", html: "text/plain", sql: "text/plain", tcl: "text/plain",
+  ppt: "application/vnd.ms-powerpoint", pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  doc: "application/msword", docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  xls: "application/vnd.ms-excel", xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" };
+function guessType(name, ct) {
+  const ext = String(name).split(".").pop().toLowerCase();
+  if (ext === "svg" || ext === "html" || ext === "htm") return "text/plain"; // never render active content inline
+  if (ct && ct !== "application/octet-stream" && !/html|svg|xml|javascript/i.test(ct)) return ct;
+  return MIME[ext] || "application/octet-stream";
+}
 function cleanLine(v, max) {
   const t = String(v ?? "").replace(/[\u0000-\u001f\u007f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g, "").replace(/\s+/g, " ").trim();
   return [...t].slice(0, max).join("");
@@ -459,10 +471,19 @@ const routes = {
     const f = (await q("select * from files where id=$1 and user_id=$2", [id, u.id]))[0];
     if (!f) throw new HttpError(404, "File not found");
     const dl = url.searchParams.get("download") === "1";
+    const type = guessType(f.name, f.content_type);
+    // ?text=1 → small text files returned directly (for the in-app preview)
+    if (url.searchParams.get("text") === "1") {
+      if (Number(f.size) > 1024 * 1024) bad("Too big to preview as text");
+      const r = await aws.fetch(objUrl(f.pathname));
+      if (!r.ok) throw new HttpError(502, "Couldn't read the file");
+      return new Response(await r.text(), { headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff" } });
+    }
     const safe = f.name.replace(/["\\\r\n]/g, "_");
     const signed = await s3SignedGet(f.pathname,
-      `${dl ? "attachment" : "inline"}; filename="${safe.replace(/[^\x20-\x7e]/g, "_")}"; filename*=UTF-8''${encodeURIComponent(f.name)}`,
-      f.content_type || "application/octet-stream");
+      `${dl ? "attachment" : "inline"}; filename="${safe.replace(/[^\x20-\x7e]/g, "_")}"; filename*=UTF-8''${encodeURIComponent(f.name)}`, type);
+    // ?json=1 → signed URL + metadata for the preview viewer
+    if (url.searchParams.get("json") === "1") return json({ url: signed, name: f.name, type, size: Number(f.size) });
     return new Response(null, { status: 302, headers: { location: signed, "cache-control": "no-store" } });
   },
   "DELETE file": async ({ req }, id) => {

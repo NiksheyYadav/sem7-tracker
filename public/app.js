@@ -369,7 +369,7 @@ function asCard(s, k) {
     </div>
     <label class="f"><span>Notes</span><textarea class="in" data-f="notes" rows="2" placeholder="Faculty instructions, group members, viva questions…">${esc(a.notes || "")}</textarea></label>
     <div class="as-files">
-      ${files.map((f) => `<div class="fchip">📎 <a href="/api/file/${f.id}" target="_blank" rel="noopener">${esc(f.name)}</a><span class="muted small">${fmtSize(f.size)}</span><a class="btn sm ghost" style="flex:none" href="/api/file/${f.id}?download=1" title="Download">⤓</a></div>`).join("")}
+      ${files.map((f) => `<div class="fchip">📎 <a href="#" data-preview="${f.id}">${esc(f.name)}</a><span class="muted small">${fmtSize(f.size)}</span><button type="button" class="btn sm ghost" style="flex:none" data-preview="${f.id}" title="Preview">👁</button><a class="btn sm ghost" style="flex:none" href="/api/file/${f.id}?download=1" title="Download">⤓</a></div>`).join("")}
       <label class="btn sm ghost" style="cursor:pointer">＋ Attach report / PPT<input type="file" multiple hidden data-upload data-kind="${k}" data-sid="${s.id}"></label>
     </div>
   </div>`;
@@ -431,8 +431,9 @@ function filesView(files, sid = null) {
   </div>
   <div class="card">${files.length ? `<div class="list">${files.map((f) => { const s = subjById(f.subject_id); return `<div class="li file-row">
       <span class="dot" style="--c:${s?.color || "#94a3b8"}"></span>
-      <div style="flex:1;min-width:0"><a class="ellip" href="/api/file/${f.id}" target="_blank" rel="noopener" style="font-weight:700;text-decoration:none;color:inherit;display:block">📎 ${esc(f.name)}</a>
+      <div style="flex:1;min-width:0"><a class="ellip" href="#" data-preview="${f.id}" style="font-weight:700;text-decoration:none;color:inherit;display:block">${fileIcon(f)} ${esc(f.name)}</a>
         <div class="muted small">${sid ? "" : (s ? esc(s.short) : "General") + " · "}${f.kind ? KIND_LABEL[f.kind] + " · " : ""}${fmtSize(f.size)} · ${fmtDate(f.created_at, false)}</div></div>
+      <button class="btn sm ghost" data-preview="${f.id}" title="Preview">👁<span class="hide-sm"> Preview</span></button>
       <a class="btn sm ghost" href="/api/file/${f.id}?download=1" title="Download">⤓<span class="hide-sm"> Download</span></a>
       <button class="btn sm danger" data-delfile="${f.id}" title="Delete">✕</button></div>`; }).join("")}</div>`
     : `<div class="empty">No files yet. Everything you upload here is saved to your account, so you can download it from any device.</div>`}</div>`;
@@ -1286,6 +1287,98 @@ async function syncPush() {   // keep server subscription fresh for devices alre
     if (sub) { await api("POST", "push/subscribe", sub.toJSON()); if (!S.pushOn) { S.pushOn = true; if (route === "notifications") render(); } }
   } catch {}
 }
+
+// ------------------------------------------------------------ file preview
+const extOf = (n) => String(n).split(".").pop().toLowerCase();
+function previewKind(name, type) {
+  const e = extOf(name);
+  if (/^image\/(png|jpe?g|gif|webp|bmp|avif)/.test(type) || ["png", "jpg", "jpeg", "gif", "webp", "bmp", "avif"].includes(e)) return "image";
+  if (type === "application/pdf" || e === "pdf") return "pdf";
+  if (/^video\//.test(type) || ["mp4", "webm", "mov", "m4v"].includes(e)) return "video";
+  if (/^audio\//.test(type) || ["mp3", "wav", "m4a", "ogg", "aac"].includes(e)) return "audio";
+  if (["ppt", "pptx", "doc", "docx", "xls", "xlsx"].includes(e)) return "office";
+  if (/^text\//.test(type) || ["txt", "md", "csv", "json", "py", "js", "ts", "java", "c", "cpp", "h", "sql", "tcl", "html", "css", "xml", "yml", "yaml", "ipynb", "r", "sh", "log", "svg"].includes(e)) return "text";
+  return "none";
+}
+function fileIcon(f) { return { image: "🖼", pdf: "📕", video: "🎬", audio: "🎵", office: ["ppt", "pptx"].includes(extOf(f.name)) ? "📊" : ["xls", "xlsx"].includes(extOf(f.name)) ? "📗" : "📘", text: "📝", none: "📎" }[previewKind(f.name, f.content_type || "")]; }
+let PV = null;
+async function openPreview(id, list) {
+  const files = list || S.files;
+  const idx = Math.max(0, files.findIndex((f) => f.id === id));
+  PV?.close();
+  const bg = document.createElement("div");
+  bg.className = "pv-bg";
+  bg.innerHTML = `<div class="pv">
+    <div class="pv-head"><div class="pv-name"></div><div class="pv-meta muted small"></div><div class="spacer"></div>
+      ${files.length > 1 ? `<button class="btn sm ghost" data-nav="-1" title="Previous (←)">‹</button><span class="pv-count small muted"></span><button class="btn sm ghost" data-nav="1" title="Next (→)">›</button>` : ""}
+      <a class="btn sm ghost pv-open" target="_blank" rel="noopener" title="Open in new tab">↗<span class="hide-sm"> Open</span></a>
+      <a class="btn sm primary pv-dl" title="Download">⤓<span class="hide-sm"> Download</span></a>
+      <button class="btn sm ghost" data-x title="Close (Esc)">✕</button></div>
+    <div class="pv-body"><div class="spinner"></div></div></div>`;
+  document.body.appendChild(bg);
+  document.body.style.overflow = "hidden";
+  let cur = idx;
+  const close = () => { bg.remove(); document.body.style.overflow = ""; document.removeEventListener("keydown", key); PV = null; };
+  const key = (e) => { if (e.key === "Escape") close(); if (e.key === "ArrowRight") go(1); if (e.key === "ArrowLeft") go(-1); };
+  const go = (d) => { if (files.length > 1) { cur = (cur + d + files.length) % files.length; show(); } };
+  document.addEventListener("keydown", key);
+  bg.onclick = (e) => { if (e.target === bg) close(); };
+  bg.querySelector("[data-x]").onclick = close;
+  bg.querySelectorAll("[data-nav]").forEach((b) => (b.onclick = () => go(Number(b.dataset.nav))));
+  let sx = null;
+  bg.addEventListener("touchstart", (e) => { sx = e.touches[0].clientX; }, { passive: true });
+  bg.addEventListener("touchend", (e) => { if (sx === null) return; const dx = e.changedTouches[0].clientX - sx; if (Math.abs(dx) > 70 && !bg.querySelector(".pv-body iframe")) go(dx < 0 ? 1 : -1); sx = null; });
+  async function show() {
+    const f = files[cur], body = bg.querySelector(".pv-body");
+    const s = subjById(f.subject_id);
+    bg.querySelector(".pv-name").textContent = `${fileIcon(f)} ${f.name}`;
+    bg.querySelector(".pv-meta").textContent = [s?.short, f.kind && KIND_LABEL[f.kind], fmtSize(f.size)].filter(Boolean).join(" · ");
+    const c = bg.querySelector(".pv-count"); if (c) c.textContent = `${cur + 1} / ${files.length}`;
+    bg.querySelector(".pv-dl").href = `/api/file/${f.id}?download=1`;
+    bg.querySelector(".pv-open").href = `/api/file/${f.id}`;
+    body.innerHTML = `<div class="spinner"></div>`;
+    try {
+      const m = await api("GET", `file/${f.id}?json=1`);
+      if (files[cur] !== f) return;
+      const k = previewKind(m.name, m.type);
+      const noPrev = (msg) => `<div class="pv-none"><div style="font-size:54px">${fileIcon(f)}</div><b>${esc(msg)}</b><p class="muted small">Download it to open on your device.</p><a class="btn primary" href="/api/file/${f.id}?download=1">⤓ Download ${fmtSize(f.size)}</a></div>`;
+      if (k === "image") body.innerHTML = `<img src="${esc(m.url)}" alt="${esc(m.name)}">`;
+      else if (k === "pdf") body.innerHTML = `<iframe src="${esc(m.url)}#view=FitH" title="${esc(m.name)}"></iframe>${/iphone|ipad/i.test(navigator.userAgent) ? `<div class="pv-hint">Only seeing one page? Tap <b>↗ Open</b> for the full PDF.</div>` : ""}`;
+      else if (k === "video") body.innerHTML = `<video src="${esc(m.url)}" controls playsinline></video>`;
+      else if (k === "audio") body.innerHTML = `<div class="pv-none"><div style="font-size:54px">🎵</div><audio src="${esc(m.url)}" controls></audio></div>`;
+      else if (k === "office") {
+        if (m.size > 10 * 1024 * 1024 && /xls/.test(extOf(m.name))) body.innerHTML = noPrev("Spreadsheet too big for online preview");
+        else body.innerHTML = `<iframe src="https://view.officeapps.live.com/op/embed.aspx?src=${encodeURIComponent(m.url)}" title="${esc(m.name)}"></iframe><div class="pv-hint">Shown with Microsoft's online viewer. If it stays blank, use Download.</div>`;
+      }
+      else if (k === "text") {
+        if (m.size > 1024 * 1024) body.innerHTML = noPrev("Too big to preview as text");
+        else {
+          const r = await fetch(`/api/file/${f.id}?text=1`, { credentials: "same-origin" });
+          const t = await r.text();
+          if (files[cur] !== f) return;
+          body.innerHTML = `<pre class="pv-text"></pre>`;
+          body.querySelector("pre").textContent = extOf(m.name) === "ipynb" ? nbToText(t) : t;
+        }
+      }
+      else body.innerHTML = noPrev("No preview for this file type");
+    } catch (e) { body.innerHTML = `<div class="pv-none"><b>Couldn't load the preview</b><p class="muted small">${esc(e.message)}</p></div>`; }
+  }
+  PV = { close };
+  show();
+}
+function nbToText(t) {
+  try { return JSON.parse(t).cells.map((c) => `${c.cell_type === "code" ? "# ── code ──" : "# ── " + c.cell_type + " ──"}\n${[].concat(c.source).join("")}`).join("\n\n"); } catch { return t; }
+}
+document.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-preview]");
+  if (!b) return;
+  e.preventDefault();
+  const id = Number(b.dataset.preview);
+  const card = b.closest(".as");
+  const list = card ? S.files.filter((f) => f.subject_id === Number(card.dataset.sid) && f.kind === card.dataset.kind)
+    : route === "subject" ? S.files.filter((f) => f.subject_id === Number(routeArg)) : S.files;
+  openPreview(id, list);
+});
 
 // ------------------------------------------------------------ uploads
 function xhrPut(url, file, type, onProgress) {
