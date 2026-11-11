@@ -7,6 +7,7 @@ Built and tested locally, NOT deployed yet:
 - Feedback page (More menu) plus admin inbox with status/reply
 - Admin class-notes uploads per subject, optional unit (`shared_notes` table, keys n/<sid>/...)
 - Leaderboard section tabs
+- Update check: /api/version (content hash), "New version available · Refresh" bar on resume + every 15 min, "⟳ Refresh app" in More, silent data refresh after 2+ min away
 
 To ship:
 1. Live DB: run the `shared_notes` create-table and index from migrations-v2.sql (idempotent; the last attempt may have partly run). admins/feedback and the targeting columns already exist live.

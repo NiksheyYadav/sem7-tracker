@@ -576,3 +576,11 @@ a.autolink:hover { background: color-mix(in srgb, var(--brand) 18%, transparent)
 .lb-secs button{display:inline-flex;align-items:center;gap:6px;border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.06);color:#e9e6ff;border-radius:999px;padding:7px 14px;font-weight:800;cursor:pointer;backdrop-filter:blur(6px);transition:.15s}
 .lb-secs button small{font-size:11px;opacity:.7;background:rgba(255,255,255,.12);border-radius:999px;padding:1px 6px}
 .lb-secs button.on{background:linear-gradient(135deg,#ffd451,#ff8a3d);color:#2b1600;border-color:transparent;box-shadow:0 6px 20px rgba(255,170,60,.35)}
+/* update available bar */
+.upd-bar{position:fixed;left:50%;transform:translateX(-50%);bottom:18px;z-index:60;display:flex;align-items:center;gap:10px;max-width:calc(100vw - 24px);
+  padding:10px 10px 10px 16px;border-radius:16px;background:#14112b;color:#fff;box-shadow:0 12px 40px rgba(20,10,60,.35);animation:updIn .35s cubic-bezier(.2,.9,.3,1.2)}
+.upd-bar>span{font-size:14px;min-width:0}
+.upd-x{background:none;border:0;color:#fff;opacity:.6;font-size:16px;cursor:pointer;padding:4px 6px}
+@keyframes updIn{from{opacity:0;transform:translate(-50%,20px)}}
+@media (max-width:760px){.upd-bar{bottom:calc(74px + env(safe-area-inset-bottom))}}
+.upd-bar b{white-space:nowrap}

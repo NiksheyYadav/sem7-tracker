@@ -72,7 +72,8 @@ const ADMIN_ROLLS = () => (process.env.ADMIN_ROLLS || "").split(",").map((s) => 
 const KINDS = ["TA1", "TA2", "TA3", "TA4", "TA5", "ERLA1", "ERLA2", "PA"];
 const COOKIE = "tk";
 const MAX_FILE = 100 * 1024 * 1024; // 100 MB
-const STATIC_VER = String(Date.now());
+// content hash, so every instance agrees on the version and it only changes when the code does
+const STATIC_VER = (() => { let h = 0x811c9dc5; for (const t of [APP_JS, STYLE_CSS, INDEX_HTML]) for (let i = 0; i < t.length; i++) { h ^= t.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; } return h.toString(36); })();
 
 class HttpError extends Error { constructor(status, msg) { super(msg); this.status = status; } }
 const bad = (m) => { throw new HttpError(400, m); };
@@ -860,6 +861,9 @@ const routes = {
         (select count(*) from files f where f.user_id=u.id)::int as files
       from users u order by u.section nulls last, u.roll_no`) });
   },
+
+  // ---- build version, so an open/installed app can tell it's out of date
+  "GET version": async () => json({ v: STATIC_VER }),
 
   // ---- admins (main admin only)
   "GET admins": async ({ req }) => {

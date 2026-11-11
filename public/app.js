@@ -277,6 +277,7 @@ function shell(content) {
         <a href="#/exams">◷ Unit assessments</a>
         <a href="#/notifications">🔔 Notifications</a>
         <a href="#/updates">✦ Update log</a>
+        <a href="#" data-hardrefresh>⟳ Refresh app</a>
         <a href="#/feedback"${route === "feedback" ? ' style="background:var(--surface-2)"' : ""}>💬 Feedback</a>
         <a href="#/settings">⚙ Subjects &amp; settings</a>
         <button id="expJson">⤓ Export my data (JSON)</button>
@@ -1727,6 +1728,43 @@ function parseRoute() {
   if (prev !== route + routeArg) notesCache._edit = null;
 }
 window.addEventListener("hashchange", () => { parseRoute(); if (S) { render(); window.scrollTo(0, 0); } });
+
+// ------------------------------------------------------------ staying up to date
+// Installed apps resume from memory instead of reloading, so check for a new build on resume.
+const MY_VER = new URL(import.meta.url).searchParams.get("v") || "";
+let newVer = false, hiddenAt = 0;
+async function hardRefresh() {
+  try { const reg = await navigator.serviceWorker?.getRegistration(); await reg?.update(); } catch {}
+  try { for (const k of (await caches?.keys?.()) || []) await caches.delete(k); } catch {}
+  location.reload();
+}
+function showUpdateBar() {
+  if (document.getElementById("updBar")) return;
+  const b = document.createElement("div");
+  b.id = "updBar"; b.className = "upd-bar"; b.setAttribute("role", "status");
+  b.innerHTML = `<span>✨ <b>New version available</b><span class="hide-sm"> — refresh to get the latest features</span></span><button class="btn sm grad" data-hardrefresh>Refresh</button><button class="upd-x" aria-label="Later">✕</button>`;
+  b.querySelector(".upd-x").onclick = () => b.remove();
+  document.body.appendChild(b);
+}
+async function checkVersion() {
+  if (!MY_VER || newVer) return;
+  try {
+    const r = await fetch("/api/version", { cache: "no-store", credentials: "same-origin" });
+    const { v } = await r.json();
+    if (v && v !== MY_VER) { newVer = true; showUpdateBar(); }
+  } catch {}
+}
+const busy = () => document.querySelector(".modal-bg, .pv-bg") || ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName);
+document.addEventListener("visibilitychange", async () => {
+  if (document.hidden) { hiddenAt = Date.now(); return; }
+  const away = hiddenAt ? Date.now() - hiddenAt : 0;
+  checkVersion();
+  // back after a while: quietly pull fresh deadlines/announcements
+  if (S && away > 2 * 60 * 1000 && !busy()) { await reloadData(); if (!busy()) render(); }
+});
+setInterval(() => { if (!document.hidden) checkVersion(); }, 15 * 60 * 1000);
+setTimeout(checkVersion, 4000);
+document.addEventListener("click", (e) => { const b = e.target.closest("[data-hardrefresh]"); if (b) { e.preventDefault(); b.textContent = "Refreshing…"; hardRefresh(); } });
 document.addEventListener("click", (e) => { const g = e.target.closest("[data-go]"); if (g && !e.target.closest("a")) location.hash = g.dataset.go; }, false);
 document.addEventListener("click", (e) => { const a = e.target.closest("[data-goto-syl]"); if (a) nextSubTab = "syllabus"; const c = e.target.closest("[data-cal-date]"); if (c) { calSel = c.dataset.calDate; calMonth = calSel.slice(0, 7); } }, true);
 document.addEventListener("visibilitychange", async () => {   // refresh when coming back to the tab
