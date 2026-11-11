@@ -101,6 +101,51 @@ function md(src) {
   return out;
 }
 
+// ------------------------------------------------------------ sections & audiences
+const DEFAULT_SECTIONS = {
+  A: { name: "Data Science", groups: { DS: "Data Science" } },
+  B: { name: "Cyber Security & Cloud Computing", groups: { CS: "Cyber Security", CC: "Cloud Computing" } },
+  C: { name: "AI/ML", groups: { AIML: "AI/ML" } },
+  D: { name: "AI/ML & iOS Development", groups: { AIML: "AI/ML", IOS: "iOS Development" } },
+};
+const SECS = () => (S && S.sections) || DEFAULT_SECTIONS;
+// is this item meant for me? (no target = whole batch)
+const forMe = (x) => !x || !x.target_section || (x.target_section === S.user.section && (!x.target_group || x.target_group === S.user.grp));
+const secLabel = (sec, grp) => sec ? `Sec ${sec}${grp ? " · " + grp : ""}` : "All sections";
+function secTag(x, showAll = false) {
+  if (!x) return "";
+  if (!x.target_section) return showAll ? `<span class="sec-tag all">All sections</span>` : "";
+  return `<span class="sec-tag" data-s="${esc(x.target_section)}">${esc(secLabel(x.target_section, x.target_group))}</span>`;
+}
+const tgtVal = (x) => (x && x.target_section ? x.target_section + "|" + (x.target_group || "") : "");
+function targetOptions(cur = "") {
+  const scope = S.user.admin_scope, opts = scope ? [] : [["", "Everyone (all sections)"]];
+  for (const [k, v] of Object.entries(SECS())) {
+    if (scope && scope !== k) continue;
+    opts.push([k + "|", `Section ${k} — ${v.name}`]);
+    const gs = Object.entries(v.groups);
+    if (gs.length > 1) for (const [g, gn] of gs) opts.push([k + "|" + g, `Section ${k} · ${gn} (${g}) only`]);
+  }
+  if (!opts.some(([v]) => v === cur)) cur = opts[0][0];
+  return opts.map(([v, l]) => `<option value="${v}" ${v === cur ? "selected" : ""}>${esc(l)}</option>`).join("");
+}
+const targetField = (cur, label = "Who is this for?") => `<label class="f"><span>${label}</span><select class="in" name="target">${targetOptions(cur ?? (S.user.admin_scope ? S.user.admin_scope + "|" : ""))}</select></label>`;
+function splitTarget(fd) { const [a, b] = String(fd.target || "").split("|"); delete fd.target; fd.target_section = a || null; fd.target_group = b || null; return fd; }
+function secOptions(cur) { return `<option value="">Choose…</option>` + Object.entries(SECS()).map(([k, v]) => `<option value="${k}" ${k === cur ? "selected" : ""}>Section ${k} — ${esc(v.name)}</option>`).join(""); }
+function grpOptions(sec, cur) {
+  const g = SECS()[sec]?.groups; if (!g) return `<option value="">Pick a section first</option>`;
+  const e = Object.entries(g);
+  return (e.length > 1 ? `<option value="">Choose…</option>` : "") + e.map(([k, v]) => `<option value="${k}" ${k === cur || e.length === 1 ? "selected" : ""}>${esc(v)} (${k})</option>`).join("");
+}
+const secGrpFields = (sec, grp, opt = "") => `<div class="sg2"><label class="f"><span>Section${opt}</span><select class="in" name="section" data-secsel>${secOptions(sec)}</select></label>
+  <label class="f"><span>Group / specialisation${opt}</span><select class="in" name="grp" data-grpsel>${grpOptions(sec, grp)}</select></label></div>`;
+function wireSecGrp(root) {
+  root.querySelectorAll("[data-secsel]").forEach((sel) => (sel.onchange = () => {
+    const g = sel.closest("form").querySelector("[data-grpsel]"); if (g) g.innerHTML = grpOptions(sel.value, "");
+  }));
+}
+const myUpdates = () => S.updates.filter((u) => u.kind === "release" || forMe(u));
+
 // ------------------------------------------------------------ derived data
 const prefs = () => S.user.prefs || {};
 function isVisible(s) {
@@ -117,7 +162,9 @@ function getA(sid, kind) {
   return S.assessments.find((a) => a.subject_id === sid && a.kind === kind) ||
     { subject_id: sid, kind, topic: "", due_date: null, report: false, ppt: false, viva: false, submitted: false, marks: null, max_marks: null, notes: "" };
 }
-const batchDL = (sid, kind) => S.deadlines.find((d) => d.subject_id === sid && d.kind === kind);
+// most specific deadline that applies to me (group > section > whole batch)
+const dlSpec = (d) => (d.target_section ? 1 : 0) + (d.target_group ? 1 : 0);
+const batchDL = (sid, kind) => S.deadlines.filter((d) => d.subject_id === sid && d.kind === kind && forMe(d)).sort((a, b) => dlSpec(b) - dlSpec(a))[0];
 const effDue = (a) => dOnly(a.due_date) || dOnly(batchDL(a.subject_id, a.kind)?.due_date) || "";
 function aScore(a) { return a.submitted ? 1 : ((a.report ? 1 : 0) + (a.ppt ? 1 : 0) + (a.viva ? 1 : 0)) / 4; }
 function subjProgress(s) { const ks = kindsFor(s.id); return ks.length ? ks.reduce((t, k) => t + aScore(getA(s.id, k)), 0) / ks.length : 0; }
@@ -128,21 +175,21 @@ function syllabusProgress(s) {
 }
 const pct = (x) => Math.round((x || 0) * 100);
 const examsFor = (sid) => S.exams.filter((e) => e.subject_id === sid);
-const myExams = () => S.exams.filter((e) => isVisible(subjById(e.subject_id)));
+const myExams = () => S.exams.filter((e) => isVisible(subjById(e.subject_id)) && forMe(e));
 
 // everything with a date, for calendar / reminders / home
 function datedItems() {
   const out = [];
-  for (const e of myExams()) if (e.exam_date) { const s = subjById(e.subject_id); out.push({ date: dOnly(e.exam_date), type: "exam", s, title: `${s.short} ${e.name}`, time: e.slot, note: e.note, href: "#/exams" }); }
+  for (const e of myExams()) if (e.exam_date) { const s = subjById(e.subject_id); out.push({ date: dOnly(e.exam_date), type: "exam", s, title: `${s.short} ${e.name}`, time: e.slot, note: e.note, href: "#/exams", tg: e }); }
   for (const s of visibleSubjects()) for (const k of kindsFor(s.id)) {
     const a = getA(s.id, k), due = effDue(a);
-    if (due && !a.submitted) out.push({ date: due, type: a.due_date ? "assess" : "deadline", s, title: `${s.short} ${KIND_LABEL[k]} due${a.topic ? " — " + a.topic : ""}`, note: batchDL(s.id, k)?.note, href: `#/subject/${s.id}` });
+    if (due && !a.submitted) out.push({ date: due, type: a.due_date ? "assess" : "deadline", s, title: `${s.short} ${KIND_LABEL[k]} due${a.topic ? " — " + a.topic : ""}`, note: batchDL(s.id, k)?.note, href: `#/subject/${s.id}`, tg: a.due_date ? null : batchDL(s.id, k) });
   }
   for (const a of S.assignments) if (!a.done && a.due_date) out.push({ date: dOnly(a.due_date), type: "asg", s: subjById(a.subject_id), title: `Assignment: ${a.title}`, href: "#/assignments" });
   for (const ev of S.events) {
     const s = subjById(ev.subject_id);
-    if (!ev.user_id && s && !isVisible(s)) continue;
-    out.push({ date: dOnly(ev.event_date), type: ev.user_id ? "event" : "batch", s, title: ev.title, time: ev.event_time, note: ev.note, ev, color: ev.color });
+    if (!ev.user_id && ((s && !isVisible(s)) || !forMe(ev))) continue;
+    out.push({ date: dOnly(ev.event_date), type: ev.user_id ? "event" : "batch", s, title: ev.title, time: ev.event_time, note: ev.note, ev, color: ev.color, tg: ev.user_id ? null : ev });
   }
   return out.sort((a, b) => a.date.localeCompare(b.date) || (a.time || "").localeCompare(b.time || ""));
 }
@@ -153,7 +200,7 @@ const TYPE_META = {
 function reminders() {
   return datedItems().filter((x) => { const n = daysUntil(x.date); return x.type === "exam" ? n >= 0 && n <= 7 : n >= -7 && n <= 3; });
 }
-function unreadUpdates() { const seen = prefs().notifSeen || S.user.created_at; return S.updates.filter((u) => u.created_at > seen); }
+function unreadUpdates() { const seen = prefs().notifSeen || S.user.created_at; return myUpdates().filter((u) => u.created_at > seen); }
 function badgeCount() { return unreadUpdates().length + reminders().filter((x) => daysUntil(x.date) <= 1).length; }
 
 async function savePrefs(patch) {
@@ -170,7 +217,7 @@ function renderAuth(mode = "login") {
       <div><div class="logo" style="color:#fff"><i style="background:rgba(255,255,255,.2)">✓</i> Sem 7 Tracker</div></div>
       <div>
         <h1>Every TA, ERLA, PA, report, PPT and viva in one place.</h1>
-        <p>Built for B.Tech CSE (Data Science), 7th semester, SGT University. Your own account, your own progress, your files saved in the cloud.</p>
+        <p>Built for B.Tech CSE 7th semester, SGT University — Sections A to D. Your own account, your own progress, your files saved in the cloud.</p>
         <div class="chips"><span>TA 1–5</span><span>ERLA 1–2</span><span>PA</span><span>Report · PPT · Viva</span><span>Calendar</span><span>Study notes</span><span>Reminders</span><span>File locker</span></div>
       </div>
       <div class="small" style="opacity:.8">Data is private to your account.</div>
@@ -183,7 +230,7 @@ function renderAuth(mode = "login") {
       <form id="authf">
         ${mode === "signup" ? `<label class="f"><span>Full name</span><input class="in" name="name" required autocomplete="name"></label>` : ""}
         <label class="f"><span>Roll number</span><input class="in" name="roll_no" required inputmode="numeric" autocomplete="username" placeholder="e.g. 231302221"></label>
-        ${mode === "signup" ? `<label class="f"><span>Section (optional)</span><input class="in" name="section" placeholder="A"></label>` : ""}
+        ${mode === "signup" ? secGrpFields("", "") + `<div class="muted small" style="margin:-4px 0 10px">A: Data Science · B: Cyber Security (CS) / Cloud Computing (CC) · C: AI/ML · D: AI/ML / iOS Development</div>` : ""}
         <label class="f"><span>Password</span><input class="in" type="password" name="password" required minlength="6" autocomplete="${mode === "login" ? "current-password" : "new-password"}"></label>
         <div class="err" id="aerr"></div>
         <button class="btn grad block" type="submit">${mode === "login" ? "Log in" : "Create account"}</button>
@@ -192,6 +239,7 @@ function renderAuth(mode = "login") {
     </div></div>
   </div>`;
   $app.querySelectorAll("[data-m]").forEach((b) => (b.onclick = () => renderAuth(b.dataset.m)));
+  wireSecGrp($app);
   document.getElementById("authf").onsubmit = async (e) => {
     e.preventDefault();
     const fd = Object.fromEntries(new FormData(e.target));
@@ -229,16 +277,17 @@ function shell(content) {
         <a href="#/exams">◷ Unit assessments</a>
         <a href="#/notifications">🔔 Notifications</a>
         <a href="#/updates">✦ Update log</a>
+        <a href="#/feedback"${route === "feedback" ? ' style="background:var(--surface-2)"' : ""}>💬 Feedback</a>
         <a href="#/settings">⚙ Subjects &amp; settings</a>
         <button id="expJson">⤓ Export my data (JSON)</button>
         <button id="expCsv">⤓ Export tracker (CSV)</button>
-        ${S.user.is_admin ? `<hr><a href="#/admin">★ Admin panel</a>` : ""}
+        ${S.user.is_admin ? `<hr><a href="#/admin">★ Admin panel${S.user.admin_scope ? ` <span class="pill" style="margin-left:auto">Sec ${esc(S.user.admin_scope)}</span>` : ""}</a>` : ""}
       </div>
     </div>
     <div class="menu" id="me">
       <button class="avatar" id="meBtn" title="${esc(S.user.name)}">${esc(initials)}</button>
       <div class="menu-pop">
-        <div class="who"><b>${esc(S.user.name)}</b><div class="muted">${esc(S.user.roll_no)}${S.user.section ? " · Sec " + esc(S.user.section) : ""}</div></div>
+        <div class="who"><b>${esc(S.user.name)}</b><div class="muted">${esc(S.user.roll_no)}${S.user.section ? " · Sec " + esc(S.user.section) + (S.user.grp ? " · " + esc(S.user.grp) : "") : ""}</div></div>
         <hr>
         <button id="themeBtn">◐ ${document.documentElement.dataset.theme === "dark" ? "Light" : "Dark"} mode</button>
         <a href="#/settings">⚙ Settings</a>
@@ -271,7 +320,7 @@ function itemRow(x, opts = {}) {
   return `<a class="li" href="${href}" ${x.ev ? `data-cal-date="${x.date}"` : ""} style="text-decoration:none;color:inherit">
     <span class="dot" style="--c:${x.color || x.s?.color || "#64748b"}"></span>
     <div style="flex:1;min-width:0"><div class="ellip" style="font-weight:700">${esc(x.title)}</div>
-      <div class="muted small">${opts.noDate ? "" : fmtDate(x.date) + " · "}${label}${x.time ? " · " + esc(x.time) : ""}</div></div>
+      <div class="muted small">${opts.noDate ? "" : fmtDate(x.date) + " · "}${label}${x.time ? " · " + esc(x.time) : ""} ${secTag(x.tg)}</div></div>
     ${dueLabel(x.date)}</a>`;
 }
 
@@ -285,7 +334,7 @@ function pageHome() {
   const sylSubs = subs.filter((s) => syllabusProgress(s) !== null);
   const syl = sylSubs.length ? sylSubs.reduce((t, s) => t + syllabusProgress(s), 0) / sylSubs.length : 0;
   const openTodos = S.todos.filter((t) => !t.done);
-  const latest = S.updates.find((u) => u.kind !== "release");
+  const latest = myUpdates().find((u) => u.kind !== "release");
   const first = S.user.name.split(" ")[0];
   return `
   <section class="hero">
@@ -297,7 +346,9 @@ function pageHome() {
       <div><b>${pct(syl)}%</b><span>syllabus covered</span></div>
     </div>
   </section>
-  ${latest && unreadUpdates().some((u) => u.id === latest.id) ? `<div class="card notice" data-go="#/notifications"><b>📣 ${esc(latest.title)}</b><span class="muted small">${linkify((latest.body || "").split("\n").slice(0, 2).join(" "))}</span><span class="small" style="color:var(--brand);font-weight:700">Open notifications →</span></div>` : ""}
+  ${!S.user.section || !S.user.grp ? `<div class="card sec-ask"><form id="secF"><div><b>🏷️ Which section are you in?</b><div class="muted small">Some deadlines, reminders and announcements are only for one section or group. Set yours so you see the right ones.</div></div>
+    ${secGrpFields(S.user.section || "", S.user.grp || "")}<button class="btn grad">Save</button></form></div>` : ""}
+  ${latest && unreadUpdates().some((u) => u.id === latest.id) ? `<div class="card notice" data-go="#/notifications"><b>📣 ${secTag(latest)} ${esc(latest.title)}</b><span class="muted small">${linkify((latest.body || "").split("\n").slice(0, 2).join(" "))}</span><span class="small" style="color:var(--brand);font-weight:700">Open notifications →</span></div>` : ""}
   <div class="grid g2">
     <div class="card"><h3>⏰ Coming up <a href="#/calendar" class="small" style="margin-left:auto;font-weight:600">calendar</a></h3>
       ${items.length ? `<div class="list">${items.map((x) => itemRow(x)).join("")}</div>` : `<div class="empty">Nothing dated yet. Add due dates in a subject's TA / ERLA / PA cards, or add events in the calendar.</div>`}
@@ -341,7 +392,7 @@ function pageSubject() {
   if (!s) return `<div class="empty">Subject not found. <a href="#/subjects">Back</a></div>`;
   const syl = syllabusProgress(s);
   const files = S.files.filter((f) => f.subject_id === s.id);
-  const tabs = [["assess", "TA · ERLA · PA"], ["syllabus", `Syllabus${syl !== null ? ` ${pct(syl)}%` : ""}`], ...(s.has_notes ? [["notes", "📘 Study notes"]] : []), ["files", `Files (${files.length})`], ["cols", "Customise"]];
+  const tabs = [["assess", "TA · ERLA · PA"], ["syllabus", `Syllabus${syl !== null ? ` ${pct(syl)}%` : ""}`], ...(s.has_notes || classNotesFor(s.id).length || (S.user.is_admin && !s.owner_id) ? [["notes", `📘 Notes${classNotesFor(s.id).length ? ` (${classNotesFor(s.id).length})` : ""}`]] : []), ["files", `Files (${files.length})`], ["cols", "Customise"]];
   if (!tabs.some(([t]) => t === subTab)) subTab = "assess";
   let body = "";
   if (subTab === "assess") body = `<div class="as-grid">${kindsFor(s.id).map((k) => asCard(s, k)).join("")}</div>`;
@@ -398,16 +449,63 @@ function syllabusView(s) {
 function notesBody(s) {
   const n = notesCache[s.id];
   if (!n) { loadNotes(s.id); return `<div class="card empty"><div class="spinner" style="margin:0 auto 10px"></div>Loading notes…</div>`; }
-  const editing = S.user.is_admin && notesCache._edit === s.id;
+  const editing = S.user.is_super && notesCache._edit === s.id;
   if (editing) return `<div class="card"><h3>Edit study notes · ${esc(s.short)}</h3>
     <p class="muted small" style="margin-top:-6px">Markdown: # headings, - bullets, **bold**, | tables |, > quotes.</p>
     <textarea class="in mono" id="notesEd" rows="24">${esc(n.notes_md)}</textarea>
     <div class="row wrap" style="margin-top:10px"><button class="btn primary" id="notesSave">Save notes</button><button class="btn ghost" id="notesCancel">Cancel</button>${n.custom ? `<button class="btn danger" id="notesReset">Reset to default</button>` : ""}</div></div>`;
-  if (!n.notes_md) return `<div class="card empty">No study notes for ${esc(s.short)} yet.${S.user.is_admin ? ` <button class="btn sm ghost" id="notesEdit">Write notes</button>` : ""}</div>`;
+  if (!n.notes_md) return classNotesCard(s) + (S.user.is_super || !classNotesFor(s.id).length ? `<div class="card empty">No written study notes for ${esc(s.short)} yet.${S.user.is_super ? ` <button class="btn sm ghost" id="notesEdit">Write notes</button>` : ""}</div>` : "");
   const heads = [...n.notes_md.matchAll(/^##\s+(.+)$/gm)].map((m) => m[1]);
-  return `<div class="notes-wrap">
+  return `${classNotesCard(s)}<div class="notes-wrap">
     ${heads.length > 2 ? `<aside class="card toc"><b class="small muted">ON THIS PAGE</b>${heads.map((h, i) => `<a href="#" data-toc="${i}">${esc(h)}</a>`).join("")}</aside>` : ""}
-    <article class="card md">${S.user.is_admin ? `<button class="btn sm ghost" id="notesEdit" style="float:right">✎ Edit</button>` : ""}${md(n.notes_md)}</article></div>`;
+    <article class="card md">${S.user.is_super ? `<button class="btn sm ghost" id="notesEdit" style="float:right">✎ Edit</button>` : ""}${md(n.notes_md)}</article></div>`;
+}
+// ---- class notes & material uploaded by admins (per subject, optional unit)
+const classNotesFor = (sid) => (S.sharedNotes || []).filter((n) => n.subject_id === sid);
+const unitName = (s, i) => { if (i == null) return "Whole subject"; const t = (s.units?.[i]?.title || "").replace(/^unit\s*[ivx0-9]+/i, "").replace(/^[\s·:.\-–—]+/, ""); return `Unit ${i + 1}${t ? " · " + t : ""}`; };
+function classNotesCard(s) {
+  const list = classNotesFor(s.id);
+  const groups = [null, ...(s.units || []).map((_, i) => i)].map((i) => [i, list.filter((n) => (n.unit_idx ?? null) === i)]).filter(([, l]) => l.length);
+  const admin = S.user.is_admin;
+  if (!list.length && !admin) return "";
+  const unitOpts = `<option value="">Whole subject (no specific unit)</option>` + (s.units || []).map((u, i) => `<option value="${i}">${esc(unitName(s, i))}</option>`).join("");
+  return `<div class="card cnotes" style="margin-bottom:14px"><h3>📎 Class notes &amp; material <span class="pill">${list.length}</span></h3>
+    ${groups.length ? groups.map(([i, l]) => `<div class="cn-grp"><div class="grp-h">${esc(unitName(s, i))}</div><div class="list">${l.map((n) => `<div class="li cn">
+      <span class="cn-ic">${fileIcon(n)}</span>
+      <div style="flex:1;min-width:0"><a href="#" class="ellip cn-t" data-cnprev="${n.id}">${esc(n.title || n.name)}</a>
+        <div class="muted small">${n.title ? esc(n.name) + " · " : ""}${fmtSize(n.size)} · ${fmtDate(n.created_at, false)} ${secTag(n, admin)}</div></div>
+      <button class="btn sm ghost" data-cnprev="${n.id}" title="Preview">👁<span class="hide-sm"> View</span></button>
+      <a class="btn sm ghost" href="/api/notes-file/${n.id}?download=1" title="Download">⤓</a>
+      ${admin && canManage(n) ? `<button class="btn sm ghost" data-cn-edit="${n.id}" title="Edit">✎</button><button class="btn sm danger" data-cn-del="${n.id}" title="Delete">✕</button>` : ""}
+    </div>`).join("")}</div></div>`).join("") : `<div class="empty" style="padding:10px">No notes uploaded for ${esc(s.short)} yet.</div>`}
+    ${admin ? `<form id="cnF" class="cn-up" data-sid="${s.id}"><b class="small">⇪ Upload notes for ${esc(s.short)}</b>
+      <div class="sg2"><label class="f"><span>Unit (optional)</span><select class="in" name="unit_idx">${unitOpts}</select></label>
+      <label class="f"><span>Title (optional)</span><input class="in" name="title" maxlength="120" placeholder="e.g. Unit 2 handwritten notes"></label></div>
+      ${targetField()}
+      <label class="f"><span>Files</span><input class="in" type="file" name="files" multiple required></label>
+      <div class="row wrap"><label class="tcheck" style="padding:4px 0;flex:1"><input type="checkbox" name="notify" checked><span>Notify students</span></label><button class="btn primary">Upload</button></div>
+      <div class="muted small" id="cnProg"></div></form>` : ""}
+  </div>`;
+}
+async function uploadClassNotes(form) {
+  const fd = splitTarget(Object.fromEntries(new FormData(form)));
+  const files = [...form.querySelector('[name="files"]').files], sid = Number(form.dataset.sid), prog = document.getElementById("cnProg");
+  if (!files.length) return toast("Choose a file first", true);
+  const btn = form.querySelector("button.primary"); btn.disabled = true;
+  let ok = 0;
+  for (const [i, file] of files.entries()) {
+    if (file.size > 100 * 1024 * 1024) { toast(`${file.name} is over 100 MB`, true); continue; }
+    try {
+      const type = file.type || "application/octet-stream";
+      const t = await api("POST", "notes-file/url", { subject_id: sid, name: file.name, size: file.size, type });
+      await xhrPut(t.url, file, t.type, (p) => (prog.textContent = `Uploading ${file.name}… ${p}%`)).catch((e) => { throw new Error(e.message === "network" ? "Network error" : e.message); });
+      const r = await api("POST", "notes-file/done", { key: t.key, type: t.type, subject_id: sid, unit_idx: fd.unit_idx, title: files.length > 1 ? (fd.title ? `${fd.title} (${i + 1})` : "") : fd.title,
+        target_section: fd.target_section, target_group: fd.target_group, notify: !!fd.notify && i === files.length - 1 });
+      S.sharedNotes.unshift(r.note); ok++;
+    } catch (e) { toast(`${file.name}: ${e.message}`, true); }
+  }
+  prog.textContent = ""; btn.disabled = false;
+  if (ok) { if (fd.notify) await reloadData(); render(); toast(`Uploaded ${ok} file${ok > 1 ? "s" : ""}`); }
 }
 async function loadNotes(id) {
   try { notesCache[id] = await api("GET", `notes/${id}`); } catch (e) { notesCache[id] = { notes_md: "", custom: false }; toast(e.message, true); }
@@ -422,9 +520,9 @@ function pageNotes() {
       <div style="--c:${s.color}">${notesBody(s)}</div>`;
   }
   const subs = visibleSubjects();
-  return `<h1 class="page">Study notes</h1><p class="sub">Exam-oriented notes for your subjects. More subjects will be added.</p>
-  <div class="grid g3">${subs.map((s) => `<a class="card subj" href="#/notes/${s.id}" style="--c:${s.color};${s.has_notes ? "" : "opacity:.55"}">
-    <span class="tag">${esc(s.short)}</span><h4>${esc(s.name)}</h4><div class="meta">${s.has_notes ? "📘 Notes available" : "Coming soon"}</div></a>`).join("")}</div>`;
+  return `<h1 class="page">Study notes</h1><p class="sub">Exam-oriented notes and class material for your subjects${S.user.is_admin ? " — open a subject to upload notes (pick a unit if you like)" : ""}.</p>
+  <div class="grid g3">${subs.map((s) => `<a class="card subj" href="#/notes/${s.id}" style="--c:${s.color};${s.has_notes || classNotesFor(s.id).length || S.user.is_admin ? "" : "opacity:.55"}">
+    <span class="tag">${esc(s.short)}</span><h4>${esc(s.name)}</h4><div class="meta">${[s.has_notes ? "📘 Study notes" : "", classNotesFor(s.id).length ? `📎 ${classNotesFor(s.id).length} file${classNotesFor(s.id).length > 1 ? "s" : ""}` : ""].filter(Boolean).join(" · ") || "Coming soon"}</div></a>`).join("")}</div>`;
 }
 
 function filesView(files, sid = null) {
@@ -509,7 +607,7 @@ function pageAssignments() {
 }
 
 // ---- leaderboard
-let LB = null, lbLoading = false, lbConfettiDone = false;
+let LB = null, lbLoading = false, lbConfettiDone = false, lbSec = "";
 const BADGES = {
   fire: ["🔥", "Active this week"], finisher: ["✅", "5+ assessments submitted"], reports: ["📄", "5+ reports done"],
   viva: ["🎤", "5+ vivas done"], syllabus: ["📚", "75%+ syllabus covered"],
@@ -528,12 +626,15 @@ function pageLeaderboard() {
   if (!LB || Date.now() - LB._at > 30000) loadLB();
   const show = prefs().lbShow || "roll";
   const head = `<div class="lb-top">
-      <div><div class="lb-kicker">Sem VII · B.Tech CSE (DS)</div><h1 class="lb-title" data-text="LEADERBOARD">LEADERBOARD</h1>
+      <div><div class="lb-kicker">Sem VII · B.Tech CSE${lbSec ? " · Section " + esc(lbSec) : ""}</div><h1 class="lb-title" data-text="LEADERBOARD">LEADERBOARD</h1>
         <p class="lb-sub">Tick your reports, PPTs, vivas and syllabus topics. Climb the board.</p></div>
       <button class="lb-edit" id="lbEdit"><span class="lb-av mini" style="--s:30px"><span>✎</span></span><span><b>Edit my card</b><small>${{ roll: "Showing roll no.", name: "Showing name", nick: "Showing nickname" }[show] || "Showing roll no."}${prefs().lbTitle ? " · " + esc(prefs().lbTitle) : ""}</small></span></button>
 </div>`;
   if (!LB) return `<div class="lb">${lbBg()}${head}<div class="lb-loading"><div class="lb-spin"></div>Loading the rankings…</div></div>`;
-  const L = LB.list, max = Math.max(1, ...L.map((x) => x.score));
+  let L = LB.list;
+  if (lbSec) { L = L.filter((x) => x.section === lbSec).map((x) => ({ ...x })); let rk = 0, pv = null; L.forEach((x, i) => { if (x.score !== pv) { rk = i + 1; pv = x.score; } x.rank = rk; }); }
+  const max = Math.max(1, ...L.map((x) => x.score));
+  const secBar = `<div class="lb-secs">${[["", "All"], ...Object.keys(SECS()).map((k) => [k, "Sec " + k])].map(([k, l]) => `<button class="${lbSec === k ? "on" : ""}" data-lbsec="${k}">${l}<small>${k ? LB.list.filter((x) => x.section === k).length : LB.list.length}</small></button>`).join("")}</div>`;
   const me = L.find((x) => x.me);
   const ahead = me ? L.filter((x) => x.score > me.score).slice(-1)[0] : null;
   const pctile = me ? Math.max(1, Math.round((L.filter((x) => x.score > me.score).length + 1) / L.length * 100)) : 0;
@@ -555,11 +656,11 @@ function pageLeaderboard() {
   const rest = L.filter((x) => !top.includes(x));
   const rows = rest.map((x, i) => `<div class="lb-row ${x.me ? "me" : ""} ${x.score ? "" : "zero"}" style="--d:${Math.min(i, 20) * 0.05 + 0.5}s">
       <div class="rk">${x.score ? "#" + x.rank : "–"}</div>${lbAvatar(x, 40)}
-      <div class="who"><b>${esc(x.label)}${x.me ? ' <em>you</em>' : ""}</b>${x.title ? `<span class="lb-tl">${esc(x.title)}</span>` : ""}
+      <div class="who"><b>${esc(x.label)}${x.me ? ' <em>you</em>' : ""}${x.section && !lbSec ? ` <span class="sec-tag" data-s="${esc(x.section)}">${esc(x.section)}</span>` : ""}</b>${x.title ? `<span class="lb-tl">${esc(x.title)}</span>` : ""}
         <div class="bar"><i style="--w:${(x.score / max) * 100}%"></i></div></div>
       <div class="bd">${x.badges.map((b) => `<span title="${BADGES[b][1]}">${BADGES[b][0]}</span>`).join("")}</div>
       <div class="pts"><b data-count="${x.score}">0</b><small>pts</small></div></div>`).join("");
-  return `<div class="lb">${lbBg()}${head}
+  return `<div class="lb">${lbBg()}${head}${secBar}
     ${scored.length ? `<div class="podium">${pod}</div>` : `<div class="lb-empty"><div class="trophy">🏆</div><h2>The race hasn't started yet</h2><p>Open any subject, tick a report, PPT or viva, or check off a syllabus topic. The first points take the crown.</p><a class="lb-cta" href="#/subjects">Start scoring →</a></div>`}
     ${me && me.score === 0 && scored.length ? `<div class="lb-me"><div class="big"><small>Your rank</small><b>–</b><span>not on the board</span></div>
       <div class="mid"><div class="line1">Score your first points to enter the board. <b>${(scored[scored.length - 1]?.score || 0) + 1}</b> pts gets you past the last place.</div><div class="line2">One report + PPT + viva = 30 pts. Submitting = 20 more.</div></div></div>` : ""}
@@ -704,8 +805,8 @@ function pageCalendar() {
       <div class="card"><h3>${fmtDate(calSel)}${calSel === today ? ' <span class="pill brand">Today</span>' : ""}</h3>
         ${sel.length ? `<div class="list">${sel.map((x) => `<div class="li">
             <span class="dot" style="--c:${x.color || x.s?.color || "#64748b"}"></span>
-            <div style="flex:1;min-width:0"><div style="font-weight:700">${esc(x.title)}</div><div class="muted small">${TYPE_META[x.type][0]}${x.time ? " · " + esc(x.time) : ""}${x.note ? " · " + linkify(x.note) : ""}</div></div>
-            ${x.ev && (x.ev.user_id || S.user.is_admin) ? `<button class="btn sm ghost" data-edit-ev="${x.ev.id}">Edit</button>` : x.href ? `<a class="btn sm ghost" href="${x.href}">Open</a>` : ""}
+            <div style="flex:1;min-width:0"><div style="font-weight:700">${esc(x.title)}</div><div class="muted small">${TYPE_META[x.type][0]}${x.time ? " · " + esc(x.time) : ""} ${secTag(x.tg)}${x.note ? " · " + linkify(x.note) : ""}</div></div>
+            ${x.ev && (x.ev.user_id || canManage(x.ev)) ? `<button class="btn sm ghost" data-edit-ev="${x.ev.id}">Edit</button>` : x.href ? `<a class="btn sm ghost" href="${x.href}">Open</a>` : ""}
           </div>`).join("")}</div>` : `<div class="empty" style="padding:12px">Nothing on this day.</div>`}
         <form id="evF" style="margin-top:12px;border-top:1px dashed var(--line);padding-top:12px">
           <b class="small">＋ Add event on ${fmtDate(calSel, false)}</b>
@@ -716,7 +817,7 @@ function pageCalendar() {
           </div>
           <label class="f"><span>Subject (optional)</span><select class="in" name="subject_id"><option value="">—</option>${subsOpts}</select></label>
           <label class="f"><span>Note</span><input class="in" name="note" placeholder="Room, what to bring…"></label>
-          ${S.user.is_admin ? `<label class="tcheck" style="padding:4px 0"><input type="checkbox" name="batch"><span>Class event — show to everyone and notify devices</span></label>` : ""}
+          ${S.user.is_admin ? `<label class="tcheck" style="padding:4px 0"><input type="checkbox" name="batch" data-batchtoggle><span>Class event — show to classmates and notify devices</span></label><div class="batch-tgt" hidden>${targetField()}</div>` : ""}
           <button class="btn primary">Add event</button>
         </form>
       </div>
@@ -734,7 +835,7 @@ function eventModal(ev) {
     <label class="f"><span>Time</span><input class="in" name="event_time" value="${esc(ev.event_time || "")}"></label></div>
     <label class="f"><span>Subject</span><select class="in" name="subject_id"><option value="">—</option>${subsOpts}</select></label>
     <label class="f"><span>Note</span><textarea class="in" name="note" rows="2">${esc(ev.note || "")}</textarea></label>
-    ${!ev.user_id ? `<label class="tcheck" style="padding:4px 0"><input type="checkbox" name="notify"><span>Notify everyone about this change</span></label>` : ""}
+    ${!ev.user_id ? targetField(tgtVal(ev)) + `<label class="tcheck" style="padding:4px 0"><input type="checkbox" name="notify"><span>Notify them about this change</span></label>` : ""}
     <div class="row wrap" style="margin-top:6px"><button class="btn primary">Save</button><button type="button" class="btn ghost" data-close>Cancel</button><button type="button" class="btn danger" data-del style="margin-left:auto">🗑 Delete</button></div></form>`;
   document.body.appendChild(bg);
   const close = () => bg.remove();
@@ -748,10 +849,93 @@ function eventModal(ev) {
     e.preventDefault();
     const fd = Object.fromEntries(new FormData(e.target));
     try {
-      const r = await api("PUT", `event/${ev.id}`, { ...fd, subject_id: fd.subject_id ? Number(fd.subject_id) : null, notify: !!fd.notify });
+      const r = await api("PUT", `event/${ev.id}`, { ...splitTarget(fd), subject_id: fd.subject_id ? Number(fd.subject_id) : null, notify: !!fd.notify });
       S.events = S.events.map((x) => (x.id === ev.id ? r.event : x)); close(); calSel = dOnly(r.event.event_date); render(); toast("Saved");
     } catch (err) { toast(err.message, true); }
   };
+}
+
+// ---- feedback
+const FB_CATS = [["idea", "💡", "Idea"], ["bug", "🐞", "Bug"], ["design", "🎨", "Design"], ["content", "📚", "Content / data"], ["praise", "❤️", "Praise"], ["other", "💬", "Other"]];
+const FB_ST = { new: ["New", "brand"], seen: ["Seen", ""], planned: ["Planned", "amber"], done: ["Done ✓", "green"], wontfix: ["Not planned", ""] };
+let FB = null, fbLoading = false, fbFilter = "open";
+async function loadFB() {
+  if (fbLoading) return; fbLoading = true;
+  try { FB = await api("GET", "feedback"); } catch (e) { FB = { all: false, items: [] }; toast(e.message, true); }
+  fbLoading = false; if (route === "feedback") render();
+}
+const stars = (n) => n ? `<span class="fb-stars" title="${n}/5">${"★".repeat(n)}<i>${"★".repeat(5 - n)}</i></span>` : "";
+function fbItem(f, all) {
+  const [cIc, cL] = (FB_CATS.find((c) => c[0] === f.category) || ["", "💬", "Other"]).slice(1);
+  const [sL, sT] = FB_ST[f.status] || FB_ST.new;
+  return `<div class="fb-item ${f.status}">
+    <div class="row between wrap"><div class="row" style="gap:6px;flex-wrap:wrap"><span class="pill">${cIc} ${cL}</span>${stars(f.rating)}<span class="pill ${sT}">${sL}</span></div>
+      <span class="muted small">${all ? `<b>${esc(f.name || "deleted account")}</b> ${esc(f.roll_no || "")}${f.section ? " · Sec " + esc(f.section) : ""} · ` : ""}${fmtStamp(f.created_at)}</span></div>
+    <div class="fb-msg">${linkify(f.message)}</div>
+    ${!all && f.reply ? `<div class="fb-reply"><b>Reply from admin</b><div>${linkify(f.reply)}</div></div>` : ""}
+    ${all ? `<form class="fb-adm" data-fb="${f.id}"><select class="in" name="status">${Object.entries(FB_ST).map(([k, [l]]) => `<option value="${k}" ${k === f.status ? "selected" : ""}>${l}</option>`).join("")}</select>
+      <input class="in" name="reply" value="${esc(f.reply || "")}" placeholder="Reply (they'll see it on their Feedback page)"><button class="btn sm primary">Save</button><button type="button" class="btn sm danger" data-fbdel="${f.id}">✕</button></form>`
+      : f.status === "new" ? `<button class="btn sm ghost" data-fbdel="${f.id}" style="margin-top:6px">Withdraw</button>` : ""}
+  </div>`;
+}
+function pageFeedback() {
+  if (!FB) loadFB();
+  const all = FB?.all;
+  const items = FB?.items || [];
+  const shown = all ? items.filter((f) => (fbFilter === "open" ? !["done", "wontfix"].includes(f.status) : fbFilter === "all" ? true : f.status === fbFilter)) : items;
+  const rated = items.filter((f) => f.rating), avg = rated.length ? rated.reduce((t, f) => t + f.rating, 0) / rated.length : 0;
+  return `<h1 class="page">Feedback</h1><p class="sub">Found a bug? Want a feature? Something confusing? Tell us — every message is read. Your feedback is only visible to you and the main admin.</p>
+  <div class="grid g2 fb-grid">
+    <div class="card"><h3>✍️ Share feedback</h3><form id="fbF">
+      <div class="fb-cats">${FB_CATS.map(([k, ic, l], i) => `<label><input type="radio" name="category" value="${k}" ${i === 0 ? "checked" : ""}><span>${ic} ${l}</span></label>`).join("")}</div>
+      <div class="f"><span class="small muted" style="font-weight:600">How's the platform so far? <em>(optional)</em></span>
+        <div class="fb-rate">${[5, 4, 3, 2, 1].map((n) => `<input type="radio" name="rating" value="${n}" id="r${n}"><label for="r${n}" title="${n} star${n > 1 ? "s" : ""}">★</label>`).join("")}</div></div>
+      <label class="f"><span>Your message</span><textarea class="in" name="message" rows="5" required minlength="3" maxlength="3000" placeholder="e.g. It'd be great if the calendar could… / On my phone the Files page…"></textarea></label>
+      <button class="btn grad">Send feedback</button></form></div>
+    <div class="card">${all ? `<h3>📥 Inbox <span class="pill">${items.filter((f) => f.status === "new").length} new</span>${rated.length ? `<span class="muted small" style="margin-left:auto">avg ${avg.toFixed(1)} ★ (${rated.length})</span>` : ""}</h3>
+      <div class="chips-row">${[["open", "Open"], ["new", "New"], ["planned", "Planned"], ["done", "Done"], ["all", "All"]].map(([k, l]) => `<button class="chip ${fbFilter === k ? "on" : ""}" data-fbf="${k}">${l}</button>`).join("")}</div>`
+      : `<h3>🗂 Your feedback</h3>`}
+      ${!FB ? `<div class="empty"><div class="spinner" style="margin:0 auto"></div></div>` : shown.length ? `<div class="fb-list">${shown.map((f) => fbItem(f, all)).join("")}</div>` : `<div class="empty">${all ? "Nothing here." : "You haven't sent any feedback yet."}</div>`}
+    </div>
+  </div>`;
+}
+function wireFeedback(main) {
+  const f = main.querySelector("#fbF");
+  if (f) f.onsubmit = async (e) => {
+    e.preventDefault(); const fd = Object.fromEntries(new FormData(f));
+    const btn = f.querySelector("button"); btn.disabled = true;
+    try { const r = await api("POST", "feedback", fd); FB = FB || { all: false, items: [] }; FB.items.unshift({ ...r.feedback, roll_no: S.user.roll_no, name: S.user.name, section: S.user.section }); render(); toast("Thanks! Feedback sent 💜"); }
+    catch (err) { btn.disabled = false; toast(err.message, true); }
+  };
+  main.querySelectorAll("[data-fbf]").forEach((b) => (b.onclick = () => { fbFilter = b.dataset.fbf; render(); }));
+  main.querySelectorAll("form.fb-adm").forEach((fm) => (fm.onsubmit = async (e) => {
+    e.preventDefault(); const id = Number(fm.dataset.fb), fd = Object.fromEntries(new FormData(fm));
+    try { const r = await api("PUT", `feedback/${id}`, fd); FB.items = FB.items.map((x) => (x.id === id ? { ...x, ...r.feedback } : x)); render(); toast("Saved"); } catch (err) { toast(err.message, true); }
+  }));
+  main.querySelectorAll("[data-fbdel]").forEach((b) => (b.onclick = async () => {
+    if (!confirm("Delete this feedback?")) return;
+    const id = Number(b.dataset.fbdel);
+    try { await api("DELETE", `feedback/${id}`); FB.items = FB.items.filter((x) => x.id !== id); render(); } catch (e) { toast(e.message, true); }
+  }));
+  // class notes upload / edit / delete
+  const cnF = main.querySelector("#cnF");
+  if (cnF) cnF.onsubmit = (e) => { e.preventDefault(); uploadClassNotes(cnF); };
+  main.querySelectorAll("[data-cn-del]").forEach((b) => (b.onclick = async () => {
+    const id = Number(b.dataset.cnDel), n = S.sharedNotes.find((x) => x.id === id);
+    if (!confirm(`Delete "${n?.title || n?.name}" for everyone?`)) return;
+    try { await api("DELETE", `notes-file/${id}`); S.sharedNotes = S.sharedNotes.filter((x) => x.id !== id); render(); toast("Deleted"); } catch (e) { toast(e.message, true); }
+  }));
+  main.querySelectorAll("[data-cn-edit]").forEach((b) => (b.onclick = () => {
+    const n = S.sharedNotes.find((x) => x.id === Number(b.dataset.cnEdit)), s = subjById(n.subject_id);
+    formModal(`Edit notes · ${n.name}`, [
+      { name: "title", label: "Title", value: n.title || "" },
+      { name: "unit_idx", label: "Unit", type: "select", value: n.unit_idx ?? "", options: [["", "Whole subject"], ...(s.units || []).map((_, i) => [i, unitName(s, i)])] },
+      { html: targetField(tgtVal(n)) },
+    ], async (fd) => {
+      const r = await api("PUT", `notes-file/${n.id}`, fd);
+      S.sharedNotes = S.sharedNotes.map((x) => (x.id === n.id ? { ...x, ...r.note } : x)); render(); toast("Saved");
+    });
+  }));
 }
 
 // ---- notifications
@@ -763,8 +947,10 @@ function pushState() {
   if (Notification.permission === "denied") return "denied";
   return S.pushOn && Notification.permission === "granted" ? "on" : "off";
 }
+let notifAll = false;
 function pageNotifications() {
   const seenBefore = prefs().notifSeen || S.user.created_at;
+  const feed = notifAll ? S.updates : myUpdates();
   const rem = reminders();
   const st = pushState();
   const pushCard = {
@@ -782,10 +968,11 @@ function pageNotifications() {
     <div class="card"><h3>⏰ Reminders</h3>
       ${groups.length ? groups.map(([g, l]) => `<div class="grp"><div class="grp-h">${g}</div><div class="list">${l.map((x) => itemRow(x)).join("")}</div></div>`).join("") : `<div class="empty">Nothing due in the next few days 🎉</div>`}
     </div>
-    <div class="card"><h3>📣 Announcements &amp; updates</h3>
-      ${S.updates.length ? `<div class="list">${S.updates.slice(0, 40).map((u) => `<div class="li ann ${u.created_at > seenBefore ? "unread" : ""}">
+    <div class="card"><h3>📣 Announcements &amp; updates${S.user.is_admin ? `<button class="btn sm ghost" id="notifAll" style="margin-left:auto">${notifAll ? "Only mine" : "All sections"}</button>` : ""}</h3>
+      ${S.user.section ? `<p class="muted small" style="margin-top:-6px">Showing posts for everyone + ${esc(secLabel(S.user.section, S.user.grp))}${notifAll ? " — and every other section (admin view)" : ""}.</p>` : `<p class="muted small" style="margin-top:-6px">Set your section in <a href="#/settings">Settings</a> to also see section-only posts.</p>`}
+      ${feed.length ? `<div class="list">${feed.slice(0, 40).map((u) => `<div class="li ann ${u.created_at > seenBefore ? "unread" : ""}">
         <span class="ann-ic">${u.kind === "release" ? "✦" : u.kind === "alert" ? "📌" : "📣"}</span>
-        <div style="flex:1;min-width:0"><div style="font-weight:700">${u.version ? `<span class="pill brand">${esc(u.version)}</span> ` : ""}${esc(u.title)}</div>
+        <div style="flex:1;min-width:0"><div style="font-weight:700">${u.version ? `<span class="pill brand">${esc(u.version)}</span> ` : ""}${secTag(u, notifAll && u.kind !== "release")} ${esc(u.title)}</div>
           ${u.body ? `<div class="muted small ann-body">${md(u.body)}</div>` : ""}<div class="muted small">${fmtStamp(u.created_at)}</div></div></div>`).join("")}</div>` : `<div class="empty">No announcements yet.</div>`}
     </div>
   </div>`;
@@ -800,11 +987,11 @@ function pageUpdates() {
 }
 
 function pageExams() {
-  const all = S.exams.slice().sort((a, b) => (dOnly(a.exam_date) || "9999").localeCompare(dOnly(b.exam_date) || "9999") || (a.slot || "").localeCompare(b.slot || ""));
+  const all = S.exams.filter(forMe).slice().sort((a, b) => (dOnly(a.exam_date) || "9999").localeCompare(dOnly(b.exam_date) || "9999") || (a.slot || "").localeCompare(b.slot || ""));
   const names = [...new Set(all.map((e) => e.name))].sort().reverse();
   const table = (list) => `<div class="scroll"><table class="t"><thead><tr><th>Date</th><th>Shift / time</th><th>Subject</th><th>Countdown</th></tr></thead><tbody>
     ${list.map((e) => { const s = subjById(e.subject_id); return `<tr style="${isVisible(s) ? "" : "opacity:.45"}"><td style="white-space:nowrap"><b>${e.exam_date ? fmtDate(e.exam_date) : "TBA"}</b></td><td>${esc(e.slot || "—")}</td>
-      <td><span class="row" style="gap:7px"><span class="dot" style="--c:${s?.color}"></span><span>${esc(s?.name)}${s?.code ? ` <span class="muted small">${esc(s.code)}</span>` : ""}${s?.kind === "elective" ? ' <span class="pill">elective</span>' : ""}${e.note ? `<div class="muted small">${esc(e.note)}</div>` : ""}</span></span></td>
+      <td><span class="row" style="gap:7px"><span class="dot" style="--c:${s?.color}"></span><span>${esc(s?.name)}${s?.code ? ` <span class="muted small">${esc(s.code)}</span>` : ""}${s?.kind === "elective" ? ' <span class="pill">elective</span>' : ""} ${secTag(e)}${e.note ? `<div class="muted small">${esc(e.note)}</div>` : ""}</span></span></td>
       <td>${e.exam_date ? dueLabel(e.exam_date) : ""}</td></tr>`; }).join("")}</tbody></table></div>`;
   return `<h1 class="page">Unit assessments</h1><p class="sub">Theory exams for B.Tech CSE 7th semester · ${EXAM_VENUE}. There are three unit assessments; UA-1 and UA-2 dates for most subjects will be added once available.</p>
   ${names.map((n) => `<div class="card" style="margin-bottom:14px"><h3>${n === "UA-3" ? "Unit Assessment-3 · Dec 2026" : n === "UA-2" ? "Unit Assessment-2" : n === "UA-1" ? "Unit Assessment-1" : esc(n)}</h3>
@@ -834,7 +1021,7 @@ function pageSettings() {
     </div>
     <div class="card"><h3>Profile</h3><form id="profF">
       <label class="f"><span>Name</span><input class="in" name="name" value="${esc(S.user.name)}" required></label>
-      <label class="f"><span>Section</span><input class="in" name="section" value="${esc(S.user.section || "")}"></label>
+      ${secGrpFields(S.user.section || "", S.user.grp || "")}
       <button class="btn primary">Save</button></form></div>
     <div class="card"><h3>Change password</h3><form id="pwF">
       <label class="f"><span>Current password</span><input class="in" type="password" name="old" required autocomplete="current-password"></label>
@@ -848,28 +1035,55 @@ function pageSettings() {
   </div>`;
 }
 
+const canManage = (x) => S.user.is_super || (S.user.is_admin && !S.user.admin_scope) || (!!S.user.admin_scope && x?.target_section === S.user.admin_scope);
+let ADMINS = null, adminsLoading = false;
+async function loadAdmins() {
+  if (adminsLoading) return; adminsLoading = true;
+  try { ADMINS = (await api("GET", "admins")).admins; } catch (e) { ADMINS = []; toast(e.message, true); }
+  adminsLoading = false; if (route === "admin") render();
+}
 function pageAdmin() {
-  if (!S.user.is_admin) return `<div class="empty">This page is only for the class admin.</div>`;
+  if (!S.user.is_admin) return `<div class="empty">This page is only for admins.</div>`;
+  const sup = S.user.is_super, scope = S.user.admin_scope;
+  if (sup && !ADMINS) loadAdmins();
   const subs = S.subjects.filter((s) => !s.owner_id);
   const subOpts = (sel) => subs.map((s) => `<option value="${s.id}" ${s.id === sel ? "selected" : ""}>${esc(s.short)}</option>`).join("");
-  return `<h1 class="page">Admin panel</h1><p class="sub">Only you can see this. Everything here is shown to the whole batch. ${S.batchSize} account${S.batchSize === 1 ? "" : "s"} so far.</p>
-  <div class="grid g2">
-    <div class="card"><h3>📣 Post an announcement / update</h3><form id="updF">
-      <div style="display:grid;grid-template-columns:1fr 110px;gap:8px"><label class="f"><span>Title</span><input class="in" name="title" required placeholder="e.g. TA3 submission extended"></label>
-      <label class="f"><span>Type</span><select class="in" name="kind"><option value="notice">Notice</option><option value="release">App update</option></select></label></div>
-      <label class="f"><span>Version (for app updates)</span><input class="in" name="version" placeholder="v2.1"></label>
+  const mine = (list) => (sup || !scope ? list : list.filter(canManage));
+  const dls = mine(S.deadlines).slice().sort((a, b) => dOnly(a.due_date).localeCompare(dOnly(b.due_date)));
+  const exams = mine(S.exams).slice().sort((a, b) => (dOnly(a.exam_date) || "9").localeCompare(dOnly(b.exam_date) || "9"));
+  const evs = mine(S.events.filter((e) => !e.user_id));
+  const upds = mine(S.updates.filter((u) => sup || u.kind !== "release")).slice(0, 40);
+  return `<h1 class="page">Admin panel</h1>
+  <p class="sub">${sup ? `You're the main admin. ${S.batchSize} account${S.batchSize === 1 ? "" : "s"} so far.` : scope ? `You're an admin for <b>Section ${esc(scope)}</b> (${esc(SECS()[scope]?.name || "")}). Everything you post here goes to Section ${esc(scope)} only.` : `You're a co-admin for the whole batch.`}
+    Pick “Who is this for?” on each post — students only see what's meant for their section and group.</p>
+  ${sup ? `<div class="card adm-team"><h3>🛡 Admins</h3>
+    <p class="muted small" style="margin-top:-6px">Add a batchmate as an admin using their roll number. A section admin can post announcements, deadlines, assessments and class events for their own section, and reset passwords in it. Only you can manage admins, subjects, study notes and delete accounts.</p>
+    <form id="admF" class="adm-add"><label class="f"><span>Roll number</span><input class="in" name="roll_no" required inputmode="numeric" placeholder="e.g. 231302148"></label>
+      <label class="f"><span>Admin for</span><select class="in" name="scope_section">${Object.entries(SECS()).map(([k, v]) => `<option value="${k}">Section ${k} — ${esc(v.name)}</option>`).join("")}<option value="ALL">Whole batch (co-admin)</option></select></label>
+      <button class="btn primary">Add admin</button></form>
+    <div class="list" style="margin-top:10px">
+      <div class="li"><span class="adm-av">★</span><div style="flex:1;min-width:0"><b>${esc(S.user.name)}</b> <span class="muted small">${esc(S.user.roll_no)}</span><div class="muted small">Main admin · everything</div></div></div>
+      ${ADMINS ? ADMINS.map((a) => `<div class="li"><span class="adm-av">${esc(a.scope_section || "∀")}</span><div style="flex:1;min-width:0"><b>${esc(a.name || "Not signed up yet")}</b> <span class="muted small">${esc(a.roll_no)}</span><div class="muted small">${a.scope_section ? `Section ${esc(a.scope_section)} admin` : "Whole-batch co-admin"} · added ${fmtDate(a.created_at, false)}</div></div><button class="btn sm danger" data-del-admin="${esc(a.roll_no)}">Remove</button></div>`).join("") : `<div class="muted small" style="padding:8px">Loading…</div>`}
+    </div></div>` : ""}
+  <div class="grid g2" style="${sup ? "margin-top:14px" : ""}">
+    <div class="card"><h3>📣 Post an announcement${sup ? " / update" : ""}</h3><form id="updF">
+      <div style="display:grid;grid-template-columns:1fr ${sup ? "110px" : ""};gap:8px"><label class="f"><span>Title</span><input class="in" name="title" required placeholder="e.g. TA3 submission extended"></label>
+      ${sup ? `<label class="f"><span>Type</span><select class="in" name="kind"><option value="notice">Notice</option><option value="release">App update</option></select></label>` : ""}</div>
+      ${targetField()}
+      ${sup ? `<label class="f"><span>Version (for app updates)</span><input class="in" name="version" placeholder="v2.1"></label>` : ""}
       <label class="f"><span>Details</span><textarea class="in" name="body" rows="3" placeholder="- one point per line"></textarea></label>
-      <label class="tcheck" style="padding:4px 0"><input type="checkbox" name="notify" checked><span>Ping everyone's devices</span></label>
+      <label class="tcheck" style="padding:4px 0"><input type="checkbox" name="notify" checked><span>Ping their devices</span></label>
       <button class="btn primary">Post</button></form></div>
-    <div class="card"><h3>📌 Batch deadline (TA / ERLA / PA)</h3><form id="dlF">
+    <div class="card"><h3>📌 Deadline (TA / ERLA / PA)</h3><form id="dlF">
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
       <label class="f"><span>Subject</span><select class="in" name="subject_id">${subOpts()}</select></label>
       <label class="f"><span>Assessment</span><select class="in" name="kind">${S.kinds.map((k) => `<option value="${k}">${KIND_LABEL[k]}</option>`).join("")}</select></label></div>
+      ${targetField()}
       <label class="f"><span>Due date</span><input class="in" type="date" name="due_date"></label>
       <label class="f"><span>Note</span><input class="in" name="note" placeholder="Topic / format / faculty note"></label>
-      <label class="tcheck" style="padding:4px 0"><input type="checkbox" name="notify" checked><span>Ping everyone's devices</span></label>
-      <button class="btn primary">Save for batch</button> <span class="muted small">Empty date + note removes it.</span></form>
-      ${S.deadlines.length ? `<div class="list" style="margin-top:10px">${S.deadlines.slice().sort((a, b) => dOnly(a.due_date).localeCompare(dOnly(b.due_date))).map((d) => { const s = subjById(d.subject_id); return `<div class="li"><span class="dot" style="--c:${s?.color}"></span><div style="flex:1;min-width:0"><b>${esc(s?.short)} · ${KIND_LABEL[d.kind]}</b><div class="muted small">${d.due_date ? fmtDate(d.due_date) : "no date"}${d.note ? " — " + esc(d.note) : ""}</div></div><button class="btn sm ghost" data-edit-dl="${d.subject_id}|${d.kind}">Edit</button> <button class="btn sm danger" data-deldl="${d.subject_id}|${d.kind}">✕</button></div>`; }).join("")}</div>` : ""}
+      <label class="tcheck" style="padding:4px 0"><input type="checkbox" name="notify" checked><span>Ping their devices</span></label>
+      <button class="btn primary">Save deadline</button> <span class="muted small">A section deadline overrides the all-sections one for that section.</span></form>
+      ${dls.length ? `<div class="list" style="margin-top:10px">${dls.map((d) => { const s = subjById(d.subject_id); return `<div class="li"><span class="dot" style="--c:${s?.color}"></span><div style="flex:1;min-width:0"><b>${esc(s?.short)} · ${KIND_LABEL[d.kind]}</b> ${secTag(d, true)}<div class="muted small">${d.due_date ? fmtDate(d.due_date) : "no date"}${d.note ? " — " + esc(d.note) : ""}</div></div><button class="btn sm ghost" data-edit-dl="${d.id}">Edit</button> <button class="btn sm danger" data-deldl="${d.id}">✕</button></div>`; }).join("")}</div>` : ""}
     </div>
   </div>
   <div class="card" style="margin-top:14px"><h3>◷ Unit assessments (UA-1 / UA-2 / UA-3)</h3>
@@ -878,25 +1092,26 @@ function pageAdmin() {
       <label class="f" style="margin:0"><span>Name</span><select class="in" name="name"><option>UA-1</option><option>UA-2</option><option selected>UA-3</option><option>End-term</option></select></label>
       <label class="f" style="margin:0"><span>Date</span><input class="in" type="date" name="exam_date"></label>
       <label class="f" style="margin:0"><span>Shift / time</span><input class="in" name="slot" placeholder="Mon 10:00–11:30 AM"></label>
-      <label class="f" style="margin:0;grid-column:1/-2"><span>Note</span><input class="in" name="note" placeholder="Syllabus / marks / room"></label>
+      <label class="f" style="margin:0"><span>For</span><select class="in" name="target">${targetOptions(scope ? scope + "|" : "")}</select></label>
+      <label class="f" style="margin:0;grid-column:span 2"><span>Note</span><input class="in" name="note" placeholder="Syllabus / marks / room"></label>
       <button class="btn primary">Add assessment</button>
     </form>
-    <div class="scroll" style="margin-top:12px"><table class="t"><thead><tr><th>Subject</th><th>Name</th><th>Date</th><th>Shift</th><th></th></tr></thead><tbody>
-      ${S.exams.slice().sort((a, b) => (dOnly(a.exam_date) || "9").localeCompare(dOnly(b.exam_date) || "9")).map((e) => `<tr><td>${esc(subjById(e.subject_id)?.short)}</td><td>${esc(e.name)}</td><td style="white-space:nowrap">${e.exam_date ? fmtDate(e.exam_date) : "TBA"}</td><td>${esc(e.slot || "")}</td>
-        <td style="white-space:nowrap"><button class="btn sm ghost" data-edit-ex="${e.id}">Edit</button> <button class="btn sm danger" data-del-ex="${e.id}">✕</button></td></tr>`).join("")}
+    <div class="scroll" style="margin-top:12px"><table class="t"><thead><tr><th>Subject</th><th>Name</th><th>Date</th><th>Shift</th><th>For</th><th></th></tr></thead><tbody>
+      ${exams.map((e) => `<tr><td>${esc(subjById(e.subject_id)?.short)}</td><td>${esc(e.name)}</td><td style="white-space:nowrap">${e.exam_date ? fmtDate(e.exam_date) : "TBA"}</td><td>${esc(e.slot || "")}</td><td>${secTag(e, true)}</td>
+        <td style="white-space:nowrap">${canManage(e) ? `<button class="btn sm ghost" data-edit-ex="${e.id}">Edit</button> <button class="btn sm danger" data-del-ex="${e.id}">✕</button>` : ""}</td></tr>`).join("") || `<tr><td colspan="6" class="muted">None yet.</td></tr>`}
     </tbody></table></div></div>
   <div class="grid g2" style="margin-top:14px">
     <div class="card"><h3>📅 Class events</h3><p class="muted small" style="margin-top:-6px">Add from the <a href="#/calendar">Calendar</a> with "Class event" ticked. Current ones:</p>
-      ${S.events.filter((e) => !e.user_id).length ? `<div class="list">${S.events.filter((e) => !e.user_id).map((e) => `<div class="li"><div style="flex:1;min-width:0"><b>${esc(e.title)}</b><div class="muted small">${fmtDate(e.event_date)}${e.event_time ? " · " + esc(e.event_time) : ""}</div></div><button class="btn sm ghost" data-edit-ev="${e.id}">Edit</button></div>`).join("")}</div>` : `<div class="empty">None.</div>`}
+      ${evs.length ? `<div class="list">${evs.map((e) => `<div class="li"><div style="flex:1;min-width:0"><b>${esc(e.title)}</b> ${secTag(e, true)}<div class="muted small">${fmtDate(e.event_date)}${e.event_time ? " · " + esc(e.event_time) : ""}</div></div>${canManage(e) ? `<button class="btn sm ghost" data-edit-ev="${e.id}">Edit</button>` : ""}</div>`).join("")}</div>` : `<div class="empty">None.</div>`}
     </div>
-    <div class="card"><h3>🔑 Reset a batchmate's password</h3><form id="rstF">
+    <div class="card"><h3>🔑 Reset a ${scope ? "Section " + esc(scope) + " " : ""}batchmate's password</h3><form id="rstF">
       <label class="f"><span>Roll number</span><input class="in" name="roll_no" required></label>
       <label class="f"><span>Temporary password</span><input class="in" name="password" required minlength="6"></label>
       <button class="btn primary">Reset</button></form></div>
   </div>
   <div class="card" style="margin-top:14px"><h3>👥 Accounts</h3><div id="usersBox"><button class="btn ghost" id="loadUsers">Load list</button></div></div>
-  <div class="card" style="margin-top:14px"><h3>✦ Posted updates</h3><div class="list">${S.updates.slice(0, 30).map((u) => `<div class="li"><div style="flex:1;min-width:0"><b>${u.version ? esc(u.version) + " · " : ""}${esc(u.title)}</b><div class="muted small">${u.kind} · ${fmtStamp(u.created_at)}</div></div><button class="btn sm ghost" data-edit-upd="${u.id}">Edit</button> <button class="btn sm danger" data-del-upd="${u.id}">✕</button></div>`).join("")}</div></div>
-  <div class="card" style="margin-top:14px"><h3>📚 Subjects (shown to everyone)</h3><div class="list">${S.subjects.filter((s) => !s.owner_id).map((s) => `<div class="li"><span class="dot" style="--c:${s.color}"></span><div style="flex:1;min-width:0"><b>${esc(s.short)}</b> — ${esc(s.name)}<div class="muted small">${esc(s.code || "no code")}${s.credits ? " · " + s.credits + " credits" : ""} · ${s.kind}</div></div><button class="btn sm ghost" data-edit-sub="${s.id}">Edit</button></div>`).join("")}</div></div>`;
+  <div class="card" style="margin-top:14px"><h3>✦ Posted ${sup ? "updates" : "announcements"}</h3><div class="list">${upds.map((u) => `<div class="li"><div style="flex:1;min-width:0"><b>${u.version ? esc(u.version) + " · " : ""}${esc(u.title)}</b> ${u.kind === "release" ? "" : secTag(u, true)}<div class="muted small">${u.kind}${u.author_roll && u.author_roll !== S.user.roll_no ? " · by " + esc(u.author_roll) : ""} · ${fmtStamp(u.created_at)}</div></div>${canManage(u) ? `<button class="btn sm ghost" data-edit-upd="${u.id}">Edit</button> <button class="btn sm danger" data-del-upd="${u.id}">✕</button>` : ""}</div>`).join("") || `<div class="empty">Nothing posted yet.</div>`}</div></div>
+  ${sup ? `<div class="card" style="margin-top:14px"><h3>📚 Subjects (shown to everyone)</h3><div class="list">${S.subjects.filter((s) => !s.owner_id).map((s) => `<div class="li"><span class="dot" style="--c:${s.color}"></span><div style="flex:1;min-width:0"><b>${esc(s.short)}</b> — ${esc(s.name)}<div class="muted small">${esc(s.code || "no code")}${s.credits ? " · " + s.credits + " credits" : ""} · ${s.kind}</div></div><button class="btn sm ghost" data-edit-sub="${s.id}">Edit</button></div>`).join("")}</div></div>` : ""}`;
 }
 function examModal(e) {
   const subs = S.subjects.filter((s) => !s.owner_id);
@@ -908,7 +1123,8 @@ function examModal(e) {
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px"><label class="f"><span>Date</span><input class="in" type="date" name="exam_date" value="${dOnly(e.exam_date)}"></label>
     <label class="f"><span>Shift / time</span><input class="in" name="slot" value="${esc(e.slot || "")}"></label></div>
     <label class="f"><span>Note</span><input class="in" name="note" value="${esc(e.note || "")}"></label>
-    <label class="tcheck" style="padding:4px 0"><input type="checkbox" name="notify"><span>Notify everyone about this change</span></label>
+    ${targetField(tgtVal(e))}
+    <label class="tcheck" style="padding:4px 0"><input type="checkbox" name="notify"><span>Notify them about this change</span></label>
     <div class="row" style="margin-top:6px"><button class="btn primary">Save</button><button type="button" class="btn ghost" data-close>Cancel</button></div></form>`;
   document.body.appendChild(bg);
   const close = () => bg.remove();
@@ -917,7 +1133,7 @@ function examModal(e) {
   bg.querySelector("form").onsubmit = async (ev) => {
     ev.preventDefault();
     const fd = Object.fromEntries(new FormData(ev.target));
-    try { const r = await api("PUT", `exam/${e.id}`, { ...fd, notify: !!fd.notify }); S.exams = S.exams.map((x) => (x.id === e.id ? r.exam : x)); close(); render(); toast("Saved"); }
+    try { const r = await api("PUT", `exam/${e.id}`, { ...splitTarget(fd), notify: !!fd.notify }); S.exams = S.exams.map((x) => (x.id === e.id ? r.exam : x)); close(); render(); toast("Saved"); }
     catch (err) { toast(err.message, true); }
   };
 }
@@ -926,13 +1142,14 @@ function examModal(e) {
 function formModal(title, fields, onSave, extra = "") {
   const bg = document.createElement("div");
   bg.className = "modal-bg";
-  bg.innerHTML = `<form class="modal"><h3>${esc(title)}</h3>${fields.map((f) => `<label class="${f.type === "checkbox" ? "tcheck" : "f"}" ${f.type === "checkbox" ? 'style="padding:4px 0"' : ""}>
+  bg.innerHTML = `<form class="modal"><h3>${esc(title)}</h3>${fields.map((f) => f.html ? f.html : `<label class="${f.type === "checkbox" ? "tcheck" : "f"}" ${f.type === "checkbox" ? 'style="padding:4px 0"' : ""}>
     ${f.type === "checkbox" ? `<input type="checkbox" name="${f.name}" ${f.value ? "checked" : ""}><span>${esc(f.label)}</span>`
       : `<span>${esc(f.label)}</span>${f.type === "select" ? `<select class="in" name="${f.name}">${f.options.map(([v, l]) => `<option value="${esc(v)}" ${String(v) === String(f.value) ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>`
       : f.type === "textarea" ? `<textarea class="in" name="${f.name}" rows="${f.rows || 4}">${esc(f.value ?? "")}</textarea>`
       : `<input class="in" name="${f.name}" type="${f.type || "text"}" value="${esc(f.value ?? "")}" ${f.required ? "required" : ""}>`}`}</label>`).join("")}
     ${extra}<div class="row wrap" style="margin-top:6px"><button class="btn primary">Save</button><button type="button" class="btn ghost" data-close>Cancel</button></div></form>`;
   document.body.appendChild(bg);
+  wireSecGrp(bg);
   const close = () => bg.remove();
   bg.onclick = (e) => { if (e.target === bg) close(); };
   bg.querySelector("[data-close]").onclick = close;
@@ -940,6 +1157,7 @@ function formModal(title, fields, onSave, extra = "") {
     e.preventDefault();
     const fd = Object.fromEntries(new FormData(e.target));
     fields.filter((f) => f.type === "checkbox").forEach((f) => (fd[f.name] = !!fd[f.name]));
+    if ("target" in fd) splitTarget(fd);
     const btn = e.target.querySelector("button.primary"); btn.disabled = true;
     try { await onSave(fd); close(); } catch (err) { btn.disabled = false; toast(err.message, true); }
   };
@@ -947,7 +1165,7 @@ function formModal(title, fields, onSave, extra = "") {
 function wireUsers() {
   document.querySelectorAll("[data-edit-user]").forEach((b) => (b.onclick = () => {
     const u = window._users.find((x) => x.roll_no === b.dataset.editUser);
-    formModal(`Edit account · ${u.roll_no}`, [{ name: "name", label: "Name", value: u.name, required: true }, { name: "section", label: "Section", value: u.section || "" },
+    formModal(`Edit account · ${u.roll_no}`, [{ name: "name", label: "Name", value: u.name, required: true }, ...(S.user.is_super ? [{ html: secGrpFields(u.section || "", u.grp || "") }] : []),
       { name: "nick", label: "Leaderboard nickname (empty = remove)", value: u.nick || "" }, { name: "title", label: "Leaderboard title (empty = remove)", value: u.title || "" }], async (fd) => {
       await api("PUT", "admin/user", { roll_no: u.roll_no, ...fd }); toast("Account updated"); document.getElementById("loadUsers")?.click();
     });
@@ -979,7 +1197,7 @@ function queueSave(sid, kind) {
 function render() {
   if (!S) return renderAuth();
   const pages = { home: pageHome, subjects: pageSubjects, subject: pageSubject, checklist: pageChecklist, files: pageFiles, assignments: pageAssignments,
-    exams: pageExams, settings: pageSettings, admin: pageAdmin, calendar: pageCalendar, notifications: pageNotifications, updates: pageUpdates, notes: pageNotes, leaderboard: pageLeaderboard };
+    exams: pageExams, settings: pageSettings, admin: pageAdmin, calendar: pageCalendar, notifications: pageNotifications, updates: pageUpdates, notes: pageNotes, leaderboard: pageLeaderboard, feedback: pageFeedback };
   const y = window.scrollY;
   $app.innerHTML = shell((pages[route] || pageHome)());
   wireShell();
@@ -1099,12 +1317,25 @@ function wirePage() {
     e.preventDefault();
     const fd = Object.fromEntries(new FormData(evF));
     try {
-      const r = await api("POST", "event", { ...fd, subject_id: fd.subject_id ? Number(fd.subject_id) : null, batch: !!fd.batch });
+      if (!fd.batch) delete fd.target;
+      const r = await api("POST", "event", { ...splitTarget(fd), subject_id: fd.subject_id ? Number(fd.subject_id) : null, batch: !!fd.batch });
       S.events.push(r.event); calSel = dOnly(r.event.event_date); calMonth = calSel.slice(0, 7);
       if (fd.batch) { try { S.updates = (await api("GET", "bootstrap")).updates; } catch {} }
       render(); toast("Event added");
     } catch (err) { toast(err.message, true); }
   };
+
+  on("[data-batchtoggle]", (c) => (c.onchange = () => { const t = c.closest("form").querySelector(".batch-tgt"); if (t) t.hidden = !c.checked; }));
+  wireSecGrp(main);
+  const secF = document.getElementById("secF");
+  if (secF) secF.onsubmit = async (e) => {
+    e.preventDefault(); const fd = Object.fromEntries(new FormData(secF));
+    try { const r = await api("POST", "profile", { name: S.user.name, ...fd }); Object.assign(S.user, { section: r.section, grp: r.grp }); await reloadData(); render(); toast(`Saved — ${secLabel(r.section, r.grp)}`); } catch (err) { toast(err.message, true); }
+  };
+  const nA = document.getElementById("notifAll");
+  if (nA) nA.onclick = () => { notifAll = !notifAll; render(); };
+  on("[data-lbsec]", (b) => (b.onclick = () => { lbSec = b.dataset.lbsec; render(); }));
+  wireFeedback(main);
 
   // leaderboard card
   const lbE = document.getElementById("lbEdit");
@@ -1157,7 +1388,7 @@ function wirePage() {
   const pf = document.getElementById("profF");
   if (pf) pf.onsubmit = async (e) => {
     e.preventDefault(); const fd = Object.fromEntries(new FormData(pf));
-    try { await api("POST", "profile", fd); Object.assign(S.user, fd); render(); toast("Saved"); } catch (err) { toast(err.message, true); }
+    try { const r = await api("POST", "profile", fd); Object.assign(S.user, { name: r.name, section: r.section, grp: r.grp }); await reloadData(); render(); toast("Saved"); } catch (err) { toast(err.message, true); }
   };
   const pw = document.getElementById("pwF");
   if (pw) pw.onsubmit = async (e) => {
@@ -1171,27 +1402,31 @@ function wirePage() {
   const refreshUpdates = async () => { try { S.updates = (await api("GET", "bootstrap")).updates; } catch {} };
   const dl = document.getElementById("dlF");
   if (dl) dl.onsubmit = async (e) => {
-    e.preventDefault(); const fd = Object.fromEntries(new FormData(dl)); fd.subject_id = Number(fd.subject_id); fd.notify = !!fd.notify;
+    e.preventDefault(); const fd = splitTarget(Object.fromEntries(new FormData(dl))); fd.subject_id = Number(fd.subject_id); fd.notify = !!fd.notify;
     try {
       const r = await api("PUT", "deadline", fd);
-      S.deadlines = S.deadlines.filter((d) => !(d.subject_id === fd.subject_id && d.kind === fd.kind));
+      const same = (d) => d.subject_id === fd.subject_id && d.kind === fd.kind && tgtVal(d) === tgtVal(r.deadline || fd);
+      S.deadlines = S.deadlines.filter((d) => !same(d));
       if (r.deadline) S.deadlines.push(r.deadline);
       await refreshUpdates(); render(); toast("Batch deadline saved");
     } catch (err) { toast(err.message, true); }
   };
   on("[data-deldl]", (el) => (el.onclick = async () => {
-    const [sid, kind] = el.dataset.deldl.split("|");
-    try { await api("PUT", "deadline", { subject_id: Number(sid), kind }); S.deadlines = S.deadlines.filter((d) => !(d.subject_id === Number(sid) && d.kind === kind)); render(); } catch (e) { toast(e.message, true); }
+    const d = S.deadlines.find((x) => x.id === Number(el.dataset.deldl)); if (!d) return;
+    if (!confirm(`Remove the ${subjById(d.subject_id)?.short} ${KIND_LABEL[d.kind]} deadline for ${secLabel(d.target_section, d.target_group)}?`)) return;
+    try { await api("PUT", "deadline", { id: d.id, subject_id: d.subject_id, kind: d.kind, target_section: d.target_section, target_group: d.target_group }); S.deadlines = S.deadlines.filter((x) => x.id !== d.id); render(); } catch (e) { toast(e.message, true); }
   }));
   on("[data-edit-dl]", (b) => (b.onclick = () => {
-    const [sid, kind] = b.dataset.editDl.split("|"), d = batchDL(Number(sid), kind);
-    formModal(`Edit batch deadline · ${subjById(sid)?.short} ${KIND_LABEL[kind]}`, [
+    const d = S.deadlines.find((x) => x.id === Number(b.dataset.editDl)); if (!d) return;
+    const sid = d.subject_id, kind = d.kind;
+    formModal(`Edit deadline · ${subjById(sid)?.short} ${KIND_LABEL[kind]}`, [
+      { html: targetField(tgtVal(d)) },
       { name: "due_date", label: "Due date", type: "date", value: dOnly(d?.due_date) },
       { name: "note", label: "Note", value: d?.note || "" },
-      { name: "notify", label: "Ping everyone's devices about this change", type: "checkbox", value: false },
+      { name: "notify", label: "Ping their devices about this change", type: "checkbox", value: false },
     ], async (fd) => {
-      const r = await api("PUT", "deadline", { subject_id: Number(sid), kind, ...fd });
-      S.deadlines = S.deadlines.filter((x) => !(x.subject_id === Number(sid) && x.kind === kind));
+      const r = await api("PUT", "deadline", { id: d.id, subject_id: sid, kind, ...fd });
+      S.deadlines = S.deadlines.filter((x) => x.id !== d.id && !(r.deadline && x.id === r.deadline.id));
       if (r.deadline) S.deadlines.push(r.deadline);
       await refreshUpdates(); render(); toast("Deadline updated");
     });
@@ -1200,10 +1435,11 @@ function wirePage() {
     const u = S.updates.find((x) => x.id === Number(b.dataset.editUpd));
     formModal("Edit announcement / update", [
       { name: "title", label: "Title", value: u.title, required: true },
-      { name: "kind", label: "Type", type: "select", value: u.kind, options: [["notice", "Notice"], ["release", "App update"], ["alert", "Alert"]] },
-      { name: "version", label: "Version", value: u.version || "" },
+      { name: "kind", label: "Type", type: "select", value: u.kind, options: S.user.is_super ? [["notice", "Notice"], ["release", "App update"], ["alert", "Alert"]] : [["notice", "Notice"], ["alert", "Alert"]] },
+      ...(u.kind === "release" ? [] : [{ html: targetField(tgtVal(u)) }]),
+      ...(S.user.is_super ? [{ name: "version", label: "Version", value: u.version || "" }] : []),
       { name: "body", label: "Details", type: "textarea", value: u.body || "", rows: 5 },
-      { name: "notify", label: "Ping everyone's devices about this change", type: "checkbox", value: false },
+      { name: "notify", label: "Ping their devices about this change", type: "checkbox", value: false },
     ], async (fd) => {
       const r = await api("PUT", `update/${u.id}`, fd);
       S.updates = S.updates.map((x) => (x.id === u.id ? r.update : x)); render(); toast("Updated");
@@ -1225,7 +1461,7 @@ function wirePage() {
   const exF = document.getElementById("exF");
   if (exF) exF.onsubmit = async (e) => {
     e.preventDefault();
-    try { const r = await api("POST", "exam", Object.fromEntries(new FormData(exF))); S.exams.push(r.exam); await refreshUpdates(); render(); toast("Unit assessment added"); } catch (err) { toast(err.message, true); }
+    try { const r = await api("POST", "exam", splitTarget(Object.fromEntries(new FormData(exF)))); S.exams.push(r.exam); await refreshUpdates(); render(); toast("Unit assessment added"); } catch (err) { toast(err.message, true); }
   };
   on("[data-edit-ex]", (b) => (b.onclick = () => examModal(S.exams.find((x) => x.id === Number(b.dataset.editEx)))));
   on("[data-del-ex]", (b) => (b.onclick = async () => {
@@ -1235,7 +1471,7 @@ function wirePage() {
   }));
   const updF = document.getElementById("updF");
   if (updF) updF.onsubmit = async (e) => {
-    e.preventDefault(); const fd = Object.fromEntries(new FormData(updF));
+    e.preventDefault(); const fd = splitTarget(Object.fromEntries(new FormData(updF)));
     try { const r = await api("POST", "update", { ...fd, notify: !!fd.notify }); S.updates.unshift(r.update); updF.reset(); render(); toast("Posted"); } catch (err) { toast(err.message, true); }
   };
   on("[data-del-upd]", (b) => (b.onclick = async () => {
@@ -1248,13 +1484,23 @@ function wirePage() {
     e.preventDefault();
     try { const r = await api("POST", "admin/reset", Object.fromEntries(new FormData(rf))); rf.reset(); toast(`Password reset for ${r.user.name}`); } catch (err) { toast(err.message, true); }
   };
+  const admF = document.getElementById("admF");
+  if (admF) admF.onsubmit = async (e) => {
+    e.preventDefault(); const fd = Object.fromEntries(new FormData(admF));
+    try { const r = await api("POST", "admins", fd); ADMINS = [...(ADMINS || []).filter((a) => a.roll_no !== r.admin.roll_no), r.admin]; render(); toast(`${r.admin.name || r.admin.roll_no} is now ${r.admin.scope_section ? "Section " + r.admin.scope_section + " admin" : "a co-admin"}`); } catch (err) { toast(err.message, true); }
+  };
+  on("[data-del-admin]", (b) => (b.onclick = async () => {
+    const roll = b.dataset.delAdmin;
+    if (!confirm(`Remove admin access for ${roll}?`)) return;
+    try { await api("DELETE", `admins/${roll}`); ADMINS = ADMINS.filter((a) => a.roll_no !== roll); render(); toast("Admin removed"); } catch (e) { toast(e.message, true); }
+  }));
   const lu = document.getElementById("loadUsers");
   if (lu) lu.onclick = async () => {
     try {
       const r = await api("GET", "admin/users");
       window._users = r.users;
-      document.getElementById("usersBox").innerHTML = `<button class="btn sm ghost" id="loadUsers" style="margin-bottom:8px">↻ Refresh</button><div class="scroll"><table class="t"><thead><tr><th>Roll</th><th>Name</th><th>Sec</th><th>Done</th><th>Files</th><th>Joined</th><th></th></tr></thead><tbody>${r.users.map((u) => `<tr><td>${esc(u.roll_no)}</td><td>${esc(u.name)}${u.nick || u.title ? `<div class="muted small">${u.nick ? "“" + esc(u.nick) + "” " : ""}${u.title ? "· " + esc(u.title) : ""}</div>` : ""}</td><td>${esc(u.section || "")}</td><td>${u.submitted}</td><td>${u.files}</td><td class="muted small">${fmtDate(u.created_at, false)}</td>
-        <td style="white-space:nowrap"><button class="btn sm ghost" data-edit-user="${esc(u.roll_no)}">Edit</button>${u.roll_no === S.user.roll_no ? "" : ` <button class="btn sm danger" data-del-user="${esc(u.roll_no)}">✕</button>`}</td></tr>`).join("")}</tbody></table></div>`;
+      document.getElementById("usersBox").innerHTML = `<button class="btn sm ghost" id="loadUsers" style="margin-bottom:8px">↻ Refresh</button><div class="scroll"><table class="t"><thead><tr><th>Roll</th><th>Name</th><th>Section</th><th>Done</th><th>Files</th><th>Joined</th><th></th></tr></thead><tbody>${r.users.map((u) => `<tr><td>${esc(u.roll_no)}</td><td>${esc(u.name)}${u.nick || u.title ? `<div class="muted small">${u.nick ? "“" + esc(u.nick) + "” " : ""}${u.title ? "· " + esc(u.title) : ""}</div>` : ""}</td><td style="white-space:nowrap">${u.section ? esc(u.section) + (u.grp ? " · " + esc(u.grp) : "") : '<span class="muted">—</span>'}</td><td>${u.submitted}</td><td>${u.files}</td><td class="muted small">${fmtDate(u.created_at, false)}</td>
+        <td style="white-space:nowrap"><button class="btn sm ghost" data-edit-user="${esc(u.roll_no)}">Edit</button>${u.roll_no === S.user.roll_no || !S.user.is_super ? "" : ` <button class="btn sm danger" data-del-user="${esc(u.roll_no)}">✕</button>`}</td></tr>`).join("")}</tbody></table></div>`;
       wireUsers();
       document.getElementById("loadUsers").onclick = lu.onclick;
     } catch (e) { toast(e.message, true); }
@@ -1312,6 +1558,7 @@ function fileIcon(f) { return { image: "🖼", pdf: "📕", video: "🎬", audio
 let PV = null;
 async function openPreview(id, list) {
   const files = list || S.files;
+  const ep = (f) => f._ep || "file";
   const idx = Math.max(0, files.findIndex((f) => f.id === id));
   PV?.close();
   const bg = document.createElement("div");
@@ -1340,16 +1587,16 @@ async function openPreview(id, list) {
     const f = files[cur], body = bg.querySelector(".pv-body");
     const s = subjById(f.subject_id);
     bg.querySelector(".pv-name").textContent = `${fileIcon(f)} ${f.name}`;
-    bg.querySelector(".pv-meta").textContent = [s?.short, f.kind && KIND_LABEL[f.kind], fmtSize(f.size)].filter(Boolean).join(" · ");
+    bg.querySelector(".pv-meta").textContent = [s?.short, f.kind && KIND_LABEL[f.kind], f._ep && (f.unit_idx != null ? `Unit ${f.unit_idx + 1}` : "Class notes"), fmtSize(f.size)].filter(Boolean).join(" · ");
     const c = bg.querySelector(".pv-count"); if (c) c.textContent = `${cur + 1} / ${files.length}`;
-    bg.querySelector(".pv-dl").href = `/api/file/${f.id}?download=1`;
-    bg.querySelector(".pv-open").href = `/api/file/${f.id}`;
+    bg.querySelector(".pv-dl").href = `/api/${ep(f)}/${f.id}?download=1`;
+    bg.querySelector(".pv-open").href = `/api/${ep(f)}/${f.id}`;
     body.innerHTML = `<div class="spinner"></div>`;
     try {
-      const m = await api("GET", `file/${f.id}?json=1`);
+      const m = await api("GET", `${ep(f)}/${f.id}?json=1`);
       if (files[cur] !== f) return;
       const k = previewKind(m.name, m.type);
-      const noPrev = (msg) => `<div class="pv-none"><div style="font-size:54px">${fileIcon(f)}</div><b>${esc(msg)}</b><p class="muted small">Download it to open on your device.</p><a class="btn primary" href="/api/file/${f.id}?download=1">⤓ Download ${fmtSize(f.size)}</a></div>`;
+      const noPrev = (msg) => `<div class="pv-none"><div style="font-size:54px">${fileIcon(f)}</div><b>${esc(msg)}</b><p class="muted small">Download it to open on your device.</p><a class="btn primary" href="/api/${ep(f)}/${f.id}?download=1">⤓ Download ${fmtSize(f.size)}</a></div>`;
       if (k === "image") body.innerHTML = `<img src="${esc(m.url)}" alt="${esc(m.name)}">`;
       else if (k === "pdf") body.innerHTML = `<iframe src="${esc(m.url)}#view=FitH" title="${esc(m.name)}"></iframe>${/iphone|ipad/i.test(navigator.userAgent) ? `<div class="pv-hint">Only seeing one page? Tap <b>↗ Open</b> for the full PDF.</div>` : ""}`;
       else if (k === "video") body.innerHTML = `<video src="${esc(m.url)}" controls playsinline></video>`;
@@ -1361,7 +1608,7 @@ async function openPreview(id, list) {
       else if (k === "text") {
         if (m.size > 1024 * 1024) body.innerHTML = noPrev("Too big to preview as text");
         else {
-          const r = await fetch(`/api/file/${f.id}?text=1`, { credentials: "same-origin" });
+          const r = await fetch(`/api/${ep(f)}/${f.id}?text=1`, { credentials: "same-origin" });
           const t = await r.text();
           if (files[cur] !== f) return;
           body.innerHTML = `<pre class="pv-text"></pre>`;
@@ -1378,6 +1625,13 @@ function nbToText(t) {
   try { return JSON.parse(t).cells.map((c) => `${c.cell_type === "code" ? "# ── code ──" : "# ── " + c.cell_type + " ──"}\n${[].concat(c.source).join("")}`).join("\n\n"); } catch { return t; }
 }
 document.addEventListener("click", (e) => {
+  const cn = e.target.closest("[data-cnprev]");
+  if (cn) {
+    e.preventDefault();
+    const id = Number(cn.dataset.cnprev), me = S.sharedNotes.find((n) => n.id === id);
+    const list = S.sharedNotes.filter((n) => n.subject_id === me?.subject_id).map((n) => ({ ...n, name: n.name, _ep: "notes-file" }));
+    return openPreview(id, list);
+  }
   const b = e.target.closest("[data-preview]");
   if (!b) return;
   e.preventDefault();
@@ -1461,6 +1715,8 @@ function exportCsv() {
   }
   download(`sem7-tracker-${S.user.roll_no}.csv`, "﻿" + rows.map((r) => r.map(cell).join(",")).join("\n"), "text/csv");
 }
+
+async function reloadData() { try { const n = await api("GET", "bootstrap"); Object.assign(S, n); boot._at = Date.now(); } catch {} }
 
 // ------------------------------------------------------------ routing & boot
 function parseRoute() {

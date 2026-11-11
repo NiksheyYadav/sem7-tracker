@@ -11,3 +11,19 @@ create table if not exists push_log (user_id uuid not null references users(id) 
 alter table subjects add column if not exists notes_md text;
 update subjects set kind='minor', is_default=true, short='Cyber Sec', credits=2, color='#e11d48', sort=7 where id=8;
 update subjects set name='Seminar on Emerging Technologies' where id=5;
+
+-- v3: sections/groups, scoped admins, feedback, class notes uploads
+alter table users add column if not exists grp text;
+alter table updates add column if not exists target_section text, add column if not exists target_group text, add column if not exists author_roll text;
+alter table events add column if not exists target_section text, add column if not exists target_group text;
+alter table exams add column if not exists target_section text, add column if not exists target_group text;
+alter table batch_deadlines add column if not exists target_section text, add column if not exists target_group text;
+alter table batch_deadlines drop constraint if exists batch_deadlines_subject_id_kind_key;
+create unique index if not exists batch_deadlines_target_uq on batch_deadlines (subject_id, kind, (coalesce(target_section,'')), (coalesce(target_group,'')));
+create table if not exists admins (roll_no text primary key, scope_section text, added_by text, created_at timestamptz not null default now());
+create table if not exists feedback (id bigserial primary key, user_id uuid references users(id) on delete set null, category text not null default 'idea',
+  rating int, message text not null, status text not null default 'new', reply text, created_at timestamptz not null default now(), updated_at timestamptz not null default now());
+create table if not exists shared_notes (id bigserial primary key, subject_id int not null references subjects(id) on delete cascade, unit_idx int,
+  title text, name text not null, pathname text not null unique, size bigint not null default 0, content_type text,
+  uploaded_by uuid references users(id) on delete set null, author_roll text, target_section text, target_group text, created_at timestamptz not null default now());
+create index if not exists shared_notes_subject on shared_notes (subject_id);

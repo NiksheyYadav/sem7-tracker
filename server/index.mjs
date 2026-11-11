@@ -91,6 +91,38 @@ function readCookie(req, name) {
 const sessionCookie = (token, maxAge) => `${COOKIE}=${token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${maxAge}`;
 const issue = async (user) => signToken({ uid: user.id, exp: Math.floor(Date.now() / 1000) + 60 * 86400 });
 
+// sections & minor-specialisation groups
+const SECTIONS = {
+  A: { name: "Data Science", groups: { DS: "Data Science" } },
+  B: { name: "Cyber Security & Cloud Computing", groups: { CS: "Cyber Security", CC: "Cloud Computing" } },
+  C: { name: "AI/ML", groups: { AIML: "AI/ML" } },
+  D: { name: "AI/ML & iOS Development", groups: { AIML: "AI/ML", IOS: "iOS Development" } },
+};
+function cleanSecGrp(sec, grp) {
+  sec = String(sec || "").trim().toUpperCase();
+  if (!SECTIONS[sec]) return { section: null, grp: null };
+  const gs = Object.keys(SECTIONS[sec].groups);
+  grp = String(grp || "").trim().toUpperCase();
+  if (!gs.includes(grp)) grp = gs.length === 1 ? gs[0] : null;
+  return { section: sec, grp };
+}
+// who an item is for. Section admins can only target their own section.
+function cleanTarget(b, admin) {
+  let s = String(b.target_section || "").toUpperCase(), g = String(b.target_group || "").toUpperCase();
+  if (!SECTIONS[s]) s = null;
+  if (!s || !SECTIONS[s].groups[g]) g = null;
+  if (admin.admin_scope) {
+    if (s && s !== admin.admin_scope) throw new HttpError(403, `You can only post for Section ${admin.admin_scope}`);
+    s = admin.admin_scope;
+  }
+  return { s, g };
+}
+const canManage = (u, item) => !!u.is_super || (u.is_admin && !u.admin_scope) || (!!u.admin_scope && item?.target_section === u.admin_scope);
+const targetLabel = (s, g) => (s ? `[Sec ${s}${g ? " · " + g : ""}] ` : "");
+const VIS = (a) => `(${a}.target_section is null or (${a}.target_section = $SEC and (${a}.target_group is null or ${a}.target_group = $GRP)))`;
+const forUser = (sql, u, params = []) => q(sql.replaceAll("$SEC", `$${params.length + 1}`).replaceAll("$GRP", `$${params.length + 2}`), [...params, u.section || "", u.grp || ""]);
+const visibleTo = (u, item) => !item.target_section || (item.target_section === u.section && (!item.target_group || item.target_group === u.grp));
+
 async function currentUser(req) {
   if (req._user !== undefined) return req._user;
   const tok = readCookie(req, COOKIE);
@@ -98,11 +130,18 @@ async function currentUser(req) {
   if (tok) {
     try {
       const payload = verifyToken(tok);
-      if (payload) u = (await q("select id, roll_no, name, section, is_admin, prefs, created_at from users where id=$1", [payload.uid]))[0] || null;
+      if (payload) u = (await q("select id, roll_no, name, section, grp, prefs, created_at from users where id=$1", [payload.uid]))[0] || null;
     } catch { u = null; }
   }
-  if (u) u.is_admin = ADMIN_ROLLS().includes(u.roll_no);
+  if (u) await attachRole(u);
   req._user = u;
+  return u;
+}
+async function attachRole(u) {
+  u.is_super = ADMIN_ROLLS().includes(u.roll_no);
+  const a = u.is_super ? null : (await q("select scope_section from admins where roll_no=$1", [u.roll_no]))[0];
+  u.is_admin = u.is_super || !!a;
+  u.admin_scope = u.is_super ? null : a?.scope_section || null;
   return u;
 }
 async function needUser(req) {
@@ -130,6 +169,11 @@ function throttle(key) {
   if (a.n > 12) throw new HttpError(429, "Too many attempts — wait a few minutes");
 }
 
+async function needSuper(req) {
+  const u = await needUser(req);
+  if (!u.is_super) throw new HttpError(403, "Only the main admin can do this");
+  return u;
+}
 async function needAdmin(req) {
   const u = await needUser(req);
   if (!u.is_admin) throw new HttpError(403, "Admins only");
@@ -193,13 +237,15 @@ async function pushToUser(uid, payload) {
   if (!VAPID_PUBLIC) return 0;
   return sendMany(await q("select * from push_subs where user_id=$1", [uid]), payload);
 }
-async function broadcast(payload) {
+async function broadcast(payload, t = {}) {
   if (!VAPID_PUBLIC) return 0;
-  return sendMany(await q("select * from push_subs"), payload);
+  const subs = await q(`select p.* from push_subs p join users u on u.id = p.user_id
+    where $1::text is null or (u.section = $1 and ($2::text is null or u.grp = $2))`, [t.s || null, t.g || null]);
+  return sendMany(subs, payload);
 }
-async function announce(title, body, notify, url) {
-  await q("insert into updates (title, body, kind) values ($1,$2,'alert')", [title.slice(0, 200), (body || "").slice(0, 2000)]);
-  if (notify) await broadcast({ title, body: (body || "").slice(0, 180), url: url || "/#/notifications" });
+async function announce(title, body, notify, url, t = {}, author = null) {
+  await q("insert into updates (title, body, kind, target_section, target_group, author_roll) values ($1,$2,'alert',$3,$4,$5)", [title.slice(0, 200), (body || "").slice(0, 2000), t.s || null, t.g || null, author]);
+  if (notify) await broadcast({ title: targetLabel(t.s, t.g) + title, body: (body || "").slice(0, 180), url: url || "/#/notifications" }, t);
 }
 
 // scheduled reminders: called by a Neon cron trigger at ~8:00 and ~19:00 IST
@@ -210,7 +256,7 @@ async function runReminders(scheduledAt) {
   const tomorrow = new Date(ist.getTime() + 86400000).toISOString().slice(0, 10);
   const morning = ist.getUTCHours() < 14;
   const dates = morning ? [today, tomorrow] : [tomorrow];
-  const users = await q("select u.id, u.prefs from users u where exists (select 1 from push_subs p where p.user_id=u.id)");
+  const users = await q("select u.id, u.prefs, u.section, u.grp from users u where exists (select 1 from push_subs p where p.user_id=u.id)");
   if (!users.length) return { users: 0, sent: 0 };
   const [subjects, exams, deadlines, events] = await Promise.all([
     q("select id, short, kind, owner_id from subjects"),
@@ -229,11 +275,12 @@ async function runReminders(scheduledAt) {
     ]);
     const items = [];
     const when = (d) => (d === today ? "Today" : "Tomorrow");
-    for (const e of exams) if (visible(e.subject_id)) items.push([e.exam_date, `${sById[e.subject_id].short} ${e.name} exam${e.slot ? " (" + e.slot + ")" : ""}`]);
-    for (const e of events) if ((e.user_id === null || e.user_id === u.id) && (!e.subject_id || e.user_id || visible(e.subject_id))) items.push([e.event_date, e.title + (e.event_time ? " · " + e.event_time : "")]);
+    for (const e of exams) if (visible(e.subject_id) && visibleTo(u, e)) items.push([e.exam_date, `${sById[e.subject_id].short} ${e.name} exam${e.slot ? " (" + e.slot + ")" : ""}`]);
+    for (const e of events) if ((e.user_id === u.id || (e.user_id === null && visibleTo(u, e))) && (!e.subject_id || e.user_id || visible(e.subject_id))) items.push([e.event_date, e.title + (e.event_time ? " · " + e.event_time : "")]);
     const mineMap = Object.fromEntries(mine.map((a) => [a.subject_id + ":" + a.kind, a]));
     for (const a of mine) if (a.due_date && dates.includes(a.due_date) && !a.submitted && visible(a.subject_id)) items.push([a.due_date, `${sById[a.subject_id]?.short} ${a.kind}${a.topic ? " — " + a.topic : ""} due`]);
     for (const d of deadlines) {
+      if (!visibleTo(u, d)) continue;
       const a = mineMap[d.subject_id + ":" + d.kind];
       if (!visible(d.subject_id) || a?.submitted || a?.due_date) continue;
       items.push([d.due_date, `${sById[d.subject_id]?.short} ${d.kind} due${d.note ? " — " + d.note : ""}`]);
@@ -252,6 +299,26 @@ async function runReminders(scheduledAt) {
   return { users: users.length, sent };
 }
 
+// stream / sign a stored object for download, inline view, preview JSON or small text
+async function serveObject(f, url) {
+    const dl = url.searchParams.get("download") === "1";
+    const type = guessType(f.name, f.content_type);
+    // ?text=1 → small text files returned directly (for the in-app preview)
+    if (url.searchParams.get("text") === "1") {
+      if (Number(f.size) > 1024 * 1024) bad("Too big to preview as text");
+      const r = await aws.fetch(objUrl(f.pathname));
+      if (!r.ok) throw new HttpError(502, "Couldn't read the file");
+      return new Response(await r.text(), { headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff" } });
+    }
+    const safe = f.name.replace(/["\\\r\n]/g, "_");
+    const signed = await s3SignedGet(f.pathname,
+      `${dl ? "attachment" : "inline"}; filename="${safe.replace(/[^\x20-\x7e]/g, "_")}"; filename*=UTF-8''${encodeURIComponent(f.name)}`, type);
+    // ?json=1 → signed URL + metadata for the preview viewer
+    if (url.searchParams.get("json") === "1") return json({ url: signed, name: f.name, type, size: Number(f.size) });
+    return new Response(null, { status: 302, headers: { location: signed, "cache-control": "no-store" } });
+}
+const cleanUnit = (v, sj) => { const n = Number(v); return v === "" || v == null || !Number.isInteger(n) || n < 0 || n >= (sj?.units || []).length ? null : n; };
+
 // ---------------------------------------------------------------- routes  (c = {req, body, url})
 const routes = {
   "POST auth/signup": async ({ body: b }) => {
@@ -262,11 +329,14 @@ const routes = {
     if (!name) bad("Enter your name");
     if (pw.length < 6) bad("Password must be at least 6 characters");
     if ((await q("select 1 from users where roll_no=$1", [roll])).length) bad("This roll number already has an account — log in instead");
+    const sg = cleanSecGrp(b.section, b.grp);
+    if (!sg.section) bad("Pick your section");
+    if (!sg.grp) bad("Pick your specialisation group");
     const rows = await q(
-      "insert into users (roll_no, name, section, password_hash, is_admin) values ($1,$2,$3,$4,$5) returning id, roll_no, name, section, is_admin, prefs",
-      [roll, name, str(b.section, 20), await bcrypt.hash(pw, 10), false]
+      "insert into users (roll_no, name, section, grp, password_hash, is_admin) values ($1,$2,$3,$4,$5,false) returning id, roll_no, name, section, grp, prefs, created_at",
+      [roll, name, sg.section, sg.grp, await bcrypt.hash(pw, 10)]
     );
-    rows[0].is_admin = ADMIN_ROLLS().includes(roll);
+    await attachRole(rows[0]);
     return json({ user: rows[0] }, 200, { "set-cookie": sessionCookie(await issue(rows[0]), 60 * 86400) });
   },
 
@@ -277,7 +347,7 @@ const routes = {
     if (!u || !(await bcrypt.compare(String(b.password || ""), u.password_hash))) bad("Wrong roll number or password");
     attempts.delete("login:" + roll);
     delete u.password_hash;
-    u.is_admin = ADMIN_ROLLS().includes(u.roll_no);
+    await attachRole(u);
     return json({ user: u }, 200, { "set-cookie": sessionCookie(await issue(u), 60 * 86400) });
   },
 
@@ -306,30 +376,37 @@ const routes = {
     const u = await needUser(req);
     const name = str(b.name, 80)?.trim();
     if (!name) bad("Enter your name");
-    await q("update users set name=$1, section=$2 where id=$3", [name, str(b.section, 20), u.id]);
-    return json({ ok: true });
+    const sg = cleanSecGrp(b.section, b.grp);
+    if (!sg.section) bad("Pick your section");
+    if (!sg.grp) bad("Pick your specialisation group");
+    await q("update users set name=$1, section=$2, grp=$3 where id=$4", [name, sg.section, sg.grp, u.id]);
+    return json({ ok: true, name, section: sg.section, grp: sg.grp });
   },
 
   "GET bootstrap": async ({ req }) => {
     const u = await needUser(req);
-    const [subjects, deadlines, assessments, assignments, todos, topics, files, batch, exams, events, updates, subs] = await Promise.all([
+    const [subjects, deadlines, assessments, assignments, todos, topics, files, batch, exams, events, sharedNotes, updates, subs] = await Promise.all([
       q(`select id, code, name, short, credits, kind, is_default, units, color, owner_id, sort, (notes_md is not null) as has_db_notes
          from subjects where owner_id is null or owner_id=$1 order by sort, id`, [u.id]),
-      q("select * from batch_deadlines"),
+      u.is_admin ? q("select * from batch_deadlines") : forUser(`select * from batch_deadlines d where ${VIS("d")}`, u),
       q("select * from assessments where user_id=$1", [u.id]),
       q("select * from assignments where user_id=$1 order by done, due_date nulls last, id", [u.id]),
       q("select * from todos where user_id=$1 order by done, id desc", [u.id]),
       q("select subject_id, topic_key from topic_progress where user_id=$1 and done", [u.id]),
       q("select id, subject_id, kind, name, size, content_type, created_at from files where user_id=$1 order by created_at desc", [u.id]),
       q("select count(*)::int as n from users"),
-      q("select * from exams order by exam_date nulls last, id"),
-      q("select * from events where user_id is null or user_id=$1 order by event_date, id", [u.id]),
-      q("select id, version, title, body, kind, created_at from updates order by created_at desc limit 80"),
+      u.is_admin ? q("select * from exams order by exam_date nulls last, id") : forUser(`select * from exams e where ${VIS("e")} order by exam_date nulls last, id`, u),
+      u.is_admin ? q("select * from events where user_id is null or user_id=$1 order by event_date, id", [u.id])
+        : forUser(`select * from events e where e.user_id=$1 or (e.user_id is null and ${VIS("e")}) order by event_date, id`, u, [u.id]),
+      u.is_admin ? q("select id, subject_id, unit_idx, title, name, size, content_type, author_roll, target_section, target_group, created_at from shared_notes order by created_at desc")
+        : forUser(`select id, subject_id, unit_idx, title, name, size, content_type, target_section, target_group, created_at from shared_notes n where ${VIS("n")} order by created_at desc`, u),
+      u.is_admin ? q("select id, version, title, body, kind, created_at, target_section, target_group, author_roll from updates order by created_at desc limit 120")
+        : forUser(`select id, version, title, body, kind, created_at, target_section, target_group from updates x where ${VIS("x")} order by created_at desc limit 80`, u),
       q("select count(*)::int n from push_subs where user_id=$1", [u.id]),
     ]);
     for (const s of subjects) { s.has_notes = s.has_db_notes || !!NOTES[s.code]; delete s.has_db_notes; }
-    return json({ user: u, subjects, deadlines, assessments, assignments, todos, topics, files, exams, events, updates,
-      kinds: KINDS, batchSize: batch[0].n, pushKey: VAPID_PUBLIC, pushOn: subs[0].n > 0 });
+    return json({ user: u, subjects, deadlines, assessments, assignments, todos, topics, files, exams, events, sharedNotes, updates,
+      kinds: KINDS, batchSize: batch[0].n, pushKey: VAPID_PUBLIC, pushOn: subs[0].n > 0, sections: SECTIONS });
   },
 
   "PUT assessment": async ({ req, body: b }) => {
@@ -470,22 +547,67 @@ const routes = {
     const u = await needUser(req);
     const f = (await q("select * from files where id=$1 and user_id=$2", [id, u.id]))[0];
     if (!f) throw new HttpError(404, "File not found");
-    const dl = url.searchParams.get("download") === "1";
-    const type = guessType(f.name, f.content_type);
-    // ?text=1 → small text files returned directly (for the in-app preview)
-    if (url.searchParams.get("text") === "1") {
-      if (Number(f.size) > 1024 * 1024) bad("Too big to preview as text");
-      const r = await aws.fetch(objUrl(f.pathname));
-      if (!r.ok) throw new HttpError(502, "Couldn't read the file");
-      return new Response(await r.text(), { headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff" } });
-    }
-    const safe = f.name.replace(/["\\\r\n]/g, "_");
-    const signed = await s3SignedGet(f.pathname,
-      `${dl ? "attachment" : "inline"}; filename="${safe.replace(/[^\x20-\x7e]/g, "_")}"; filename*=UTF-8''${encodeURIComponent(f.name)}`, type);
-    // ?json=1 → signed URL + metadata for the preview viewer
-    if (url.searchParams.get("json") === "1") return json({ url: signed, name: f.name, type, size: Number(f.size) });
-    return new Response(null, { status: 302, headers: { location: signed, "cache-control": "no-store" } });
+    return serveObject(f, url);
   },
+
+  // ---- class notes & material uploaded by admins, per subject (+ optional unit)
+  "POST notes-file/url": async ({ req, body: b }) => {
+    const u = await needAdmin(req);
+    const sj = (await q("select id from subjects where id=$1 and owner_id is null", [b.subject_id]))[0];
+    if (!sj) bad("Pick a subject");
+    const size = Number(b.size || 0);
+    if (!size) bad("Empty file");
+    if (size > MAX_FILE) bad("File is over 100 MB");
+    const name = String(b.name || "file").replace(/[\\/\u0000-\u001f]+/g, "_").slice(-150);
+    const type = String(b.type || "application/octet-stream").slice(0, 120);
+    const key = `n/${sj.id}/${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}/${name}`;
+    return json({ url: await s3SignedPut(key, type), key, type });
+  },
+  "POST notes-file/done": async ({ req, body: b }) => {
+    const u = await needAdmin(req);
+    const key = String(b.key || "");
+    const sj = (await q("select id, short, units from subjects where id=$1 and owner_id is null", [b.subject_id]))[0];
+    if (!sj || !key.startsWith(`n/${sj.id}/`) || key.includes("..")) bad("Bad file key");
+    const size = await s3Head(key);
+    if (size <= 0) bad("Upload didn't reach storage — try again");
+    if (size > MAX_FILE) { await s3Del(key); bad("File is over 100 MB"); }
+    if ((await q("select 1 from shared_notes where pathname=$1", [key])).length) bad("Already saved");
+    const unit = cleanUnit(b.unit_idx, sj), t = cleanTarget(b, u), name = key.split("/").pop();
+    const rows = await q(`insert into shared_notes (subject_id, unit_idx, title, name, pathname, size, content_type, uploaded_by, author_roll, target_section, target_group)
+      values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) returning *`,
+      [sj.id, unit, cleanLine(b.title, 120) || null, name, key, size, str(b.type, 120) || "application/octet-stream", u.id, u.roll_no, t.s, t.g]);
+    if (b.notify) {
+      const where = unit === null ? sj.short : `${sj.short} · Unit ${unit + 1}`;
+      await announce(`📎 New notes: ${where}`, rows[0].title || name, true, `/#/notes/${sj.id}`, t, u.roll_no);
+    }
+    return json({ note: rows[0] });
+  },
+  "PUT notes-file": async ({ req, body: b }, id) => {
+    const u = await needAdmin(req);
+    const cur = (await q("select * from shared_notes where id=$1", [id]))[0];
+    if (!cur || !canManage(u, cur)) throw new HttpError(403, "You can only edit your section's notes");
+    const sj = (await q("select id, units from subjects where id=$1", [cur.subject_id]))[0];
+    const t = cleanTarget(b, u);
+    const rows = await q("update shared_notes set title=$1, unit_idx=$2, target_section=$3, target_group=$4 where id=$5 returning *",
+      [cleanLine(b.title, 120) || null, cleanUnit(b.unit_idx, sj), t.s, t.g, id]);
+    return json({ note: rows[0] });
+  },
+  "DELETE notes-file": async ({ req }, id) => {
+    const u = await needAdmin(req);
+    const cur = (await q("select * from shared_notes where id=$1", [id]))[0];
+    if (!cur) return json({ ok: true });
+    if (!canManage(u, cur) && cur.uploaded_by !== u.id) throw new HttpError(403, "You can only delete your section's notes");
+    await q("delete from shared_notes where id=$1", [id]);
+    try { await s3Del(cur.pathname); } catch (e) { console.error("s3 delete failed", e.message); }
+    return json({ ok: true });
+  },
+  "GET notes-file": async ({ req, url }, id) => {
+    const u = await needUser(req);
+    const f = (await q("select * from shared_notes where id=$1", [id]))[0];
+    if (!f || !(u.is_admin || visibleTo(u, f))) throw new HttpError(404, "File not found");
+    return serveObject(f, url);
+  },
+
   "DELETE file": async ({ req }, id) => {
     const u = await needUser(req);
     const rows = await q("delete from files where id=$1 and user_id=$2 returning pathname", [id, u.id]);
@@ -503,7 +625,7 @@ const routes = {
          t as (
            select tp.user_id, count(*) n from topic_progress tp join subjects sj on sj.id = tp.subject_id and sj.owner_id is null
            where tp.done group by tp.user_id)
-         select u.id, u.roll_no, u.name, coalesce(u.prefs->>'lbShow', 'roll') as show, u.prefs->>'lbNick' as nick, u.prefs->>'lbTitle' as title,
+         select u.id, u.roll_no, u.name, u.section, u.grp, coalesce(u.prefs->>'lbShow', 'roll') as show, u.prefs->>'lbNick' as nick, u.prefs->>'lbTitle' as title,
            coalesce(a.r,0)::int r, coalesce(a.p,0)::int p, coalesce(a.v,0)::int v, coalesce(a.s,0)::int s, coalesce(t.n,0)::int topics, a.last
          from users u left join a on a.user_id = u.id left join t on t.user_id = u.id`),
       q(`select coalesce(sum(jsonb_array_length(un->'topics')),0)::int n from subjects sj, jsonb_array_elements(sj.units) un where sj.owner_id is null and sj.kind <> 'elective'`),
@@ -518,7 +640,7 @@ const routes = {
       if (x.v >= 5) badges.push("viva");
       if (tot[0].n && x.topics / tot[0].n >= 0.75) badges.push("syllabus");
       const label = x.show === "nick" && x.nick ? x.nick : x.show === "name" ? x.name : x.roll_no;
-      return { me: x.id === u.id, label, title: x.title || "", show: x.show, score,
+      return { me: x.id === u.id, label, title: x.title || "", show: x.show, score, section: x.section, grp: x.grp,
         reports: x.r, ppts: x.p, vivas: x.v, submitted: x.s, topics: x.topics, badges };
     }).sort((a, b) => b.score - a.score || b.submitted - a.submitted || a.label.localeCompare(b.label));
     let rank = 0, prev = null;
@@ -543,7 +665,7 @@ const routes = {
     return json({ notes_md: s.notes_md ?? NOTES[s.code] ?? "", custom: s.notes_md != null });
   },
   "PUT notes": async ({ req, body: b }, id) => {
-    await needAdmin(req);
+    await needSuper(req);
     const md = b.reset ? null : String(b.notes_md ?? "").slice(0, 200000);
     await q("update subjects set notes_md=$1 where id=$2 and owner_id is null", [md, id]);
     return json({ ok: true });
@@ -556,26 +678,29 @@ const routes = {
     if (b.batch && !u.is_admin) throw new HttpError(403, "Only admins can add batch events");
     if (ev.subject_id) await subjectVisibleTo(u, ev.subject_id);
     if (!b.batch && (await q("select count(*)::int n from events where user_id=$1", [u.id]))[0].n >= 1000) bad("Too many events");
-    const rows = await q("insert into events (user_id, subject_id, title, event_date, event_time, note, color) values ($1,$2,$3,$4,$5,$6,$7) returning *",
-      [b.batch ? null : u.id, ev.subject_id, ev.title, ev.event_date, ev.event_time, ev.note, ev.color]);
-    if (b.batch) await announce(`New: ${ev.title}`, `${fmtD(ev.event_date)}${ev.event_time ? " · " + ev.event_time : ""}${ev.note ? "\n" + ev.note : ""}`, b.notify !== false, "/#/calendar");
+    const t = b.batch ? cleanTarget(b, u) : {};
+    const rows = await q("insert into events (user_id, subject_id, title, event_date, event_time, note, color, target_section, target_group) values ($1,$2,$3,$4,$5,$6,$7,$8,$9) returning *",
+      [b.batch ? null : u.id, ev.subject_id, ev.title, ev.event_date, ev.event_time, ev.note, ev.color, t.s || null, t.g || null]);
+    if (b.batch) await announce(`New: ${ev.title}`, `${fmtD(ev.event_date)}${ev.event_time ? " · " + ev.event_time : ""}${ev.note ? "\n" + ev.note : ""}`, b.notify !== false, "/#/calendar", t, u.roll_no);
     return json({ event: rows[0] });
   },
   "PUT event": async ({ req, body: b }, id) => {
     const u = await needUser(req);
     const cur = (await q("select * from events where id=$1", [id]))[0];
-    if (!cur || (cur.user_id ? cur.user_id !== u.id : !u.is_admin)) throw new HttpError(404, "Event not found");
+    if (!cur || (cur.user_id ? cur.user_id !== u.id : !(u.is_admin && canManage(u, cur)))) throw new HttpError(404, "Event not found");
     const ev = cleanEvent(b);
     if (ev.subject_id) await subjectVisibleTo(u, ev.subject_id);
-    const rows = await q("update events set subject_id=$1, title=$2, event_date=$3, event_time=$4, note=$5, color=$6, updated_at=now() where id=$7 returning *",
-      [ev.subject_id, ev.title, ev.event_date, ev.event_time, ev.note, ev.color, id]);
-    if (!cur.user_id && b.notify) await announce(`Updated: ${ev.title}`, `${fmtD(ev.event_date)}${ev.event_time ? " · " + ev.event_time : ""}`, true, "/#/calendar");
+    const t = cur.user_id ? {} : cleanTarget(b, u);
+    const rows = await q("update events set subject_id=$1, title=$2, event_date=$3, event_time=$4, note=$5, color=$6, target_section=$8, target_group=$9, updated_at=now() where id=$7 returning *",
+      [ev.subject_id, ev.title, ev.event_date, ev.event_time, ev.note, ev.color, id, t.s || null, t.g || null]);
+    if (!cur.user_id && b.notify) await announce(`Updated: ${ev.title}`, `${fmtD(ev.event_date)}${ev.event_time ? " · " + ev.event_time : ""}`, true, "/#/calendar", t, u.roll_no);
     return json({ event: rows[0] });
   },
   "DELETE event": async ({ req }, id) => {
     const u = await needUser(req);
-    if (u.is_admin) await q("delete from events where id=$1 and (user_id is null or user_id=$2)", [id, u.id]);
-    else await q("delete from events where id=$1 and user_id=$2", [id, u.id]);
+    const cur = (await q("select * from events where id=$1", [id]))[0];
+    if (cur && (cur.user_id === u.id || (!cur.user_id && u.is_admin && canManage(u, cur)))) await q("delete from events where id=$1", [id]);
+    else if (cur) throw new HttpError(403, "You can't delete this event");
     return json({ ok: true });
   },
 
@@ -601,50 +726,59 @@ const routes = {
 
   // ---- admin
   "POST exam": async ({ req, body: b }) => {
-    await needAdmin(req);
-    const ex = cleanExam(b);
-    const rows = await q("insert into exams (subject_id, name, exam_date, slot, note) values ($1,$2,$3,$4,$5) returning *", [ex.subject_id, ex.name, ex.exam_date, ex.slot, ex.note]);
+    const u = await needAdmin(req);
+    const ex = cleanExam(b), t = cleanTarget(b, u);
+    const rows = await q("insert into exams (subject_id, name, exam_date, slot, note, target_section, target_group) values ($1,$2,$3,$4,$5,$6,$7) returning *", [ex.subject_id, ex.name, ex.exam_date, ex.slot, ex.note, t.s, t.g]);
     const s = (await q("select short from subjects where id=$1", [ex.subject_id]))[0];
-    await announce(`${s?.short || ""} ${ex.name} scheduled`, `${ex.exam_date ? fmtD(ex.exam_date) : "Date TBA"}${ex.slot ? " · " + ex.slot : ""}`, b.notify !== false, "/#/exams");
+    await announce(`${s?.short || ""} ${ex.name} scheduled`, `${ex.exam_date ? fmtD(ex.exam_date) : "Date TBA"}${ex.slot ? " · " + ex.slot : ""}`, b.notify !== false, "/#/exams", t, u.roll_no);
     return json({ exam: rows[0] });
   },
   "PUT exam": async ({ req, body: b }, id) => {
-    await needAdmin(req);
-    const ex = cleanExam(b);
-    const rows = await q("update exams set subject_id=$1, name=$2, exam_date=$3, slot=$4, note=$5, updated_at=now() where id=$6 returning *", [ex.subject_id, ex.name, ex.exam_date, ex.slot, ex.note, id]);
+    const u = await needAdmin(req);
+    const cur = (await q("select * from exams where id=$1", [id]))[0];
+    if (!cur || !canManage(u, cur)) throw new HttpError(403, "You can only edit your section's assessments");
+    const ex = cleanExam(b), t = cleanTarget(b, u);
+    const rows = await q("update exams set subject_id=$1, name=$2, exam_date=$3, slot=$4, note=$5, target_section=$7, target_group=$8, updated_at=now() where id=$6 returning *", [ex.subject_id, ex.name, ex.exam_date, ex.slot, ex.note, id, t.s, t.g]);
     if (b.notify) {
       const s = (await q("select short from subjects where id=$1", [ex.subject_id]))[0];
-      await announce(`${s?.short || ""} ${ex.name} updated`, `${ex.exam_date ? fmtD(ex.exam_date) : "Date TBA"}${ex.slot ? " · " + ex.slot : ""}`, true, "/#/exams");
+      await announce(`${s?.short || ""} ${ex.name} updated`, `${ex.exam_date ? fmtD(ex.exam_date) : "Date TBA"}${ex.slot ? " · " + ex.slot : ""}`, true, "/#/exams", t, u.roll_no);
     }
     return json({ exam: rows[0] });
   },
   "DELETE exam": async ({ req }, id) => {
-    await needAdmin(req);
+    const u = await needAdmin(req);
+    const cur = (await q("select * from exams where id=$1", [id]))[0];
+    if (cur && !canManage(u, cur)) throw new HttpError(403, "You can only delete your section's assessments");
     await q("delete from exams where id=$1", [id]);
     return json({ ok: true });
   },
   "POST update": async ({ req, body: b }) => {
-    await needAdmin(req);
+    const u = await needAdmin(req);
     const title = str(b.title, 200)?.trim();
     if (!title) bad("Enter a title");
-    const kind = b.kind === "release" ? "release" : "notice";
-    const rows = await q("insert into updates (version, title, body, kind) values ($1,$2,$3,$4) returning *", [str(b.version, 20) || null, title, str(b.body, 5000), kind]);
-    if (b.notify !== false) await broadcast({ title, body: String(b.body || "").replace(/^[-*]\s*/gm, "• ").slice(0, 180), url: kind === "release" ? "/#/updates" : "/#/notifications" });
+    const kind = b.kind === "release" && u.is_super ? "release" : "notice";
+    const t = kind === "release" ? {} : cleanTarget(b, u);
+    const rows = await q("insert into updates (version, title, body, kind, target_section, target_group, author_roll) values ($1,$2,$3,$4,$5,$6,$7) returning *", [str(b.version, 20) || null, title, str(b.body, 5000), kind, t.s || null, t.g || null, u.roll_no]);
+    if (b.notify !== false) await broadcast({ title: targetLabel(t.s, t.g) + title, body: String(b.body || "").replace(/^[-*]\s*/gm, "• ").slice(0, 180), url: kind === "release" ? "/#/updates" : "/#/notifications" }, t);
     return json({ update: rows[0] });
   },
   "PUT update": async ({ req, body: b }, id) => {
-    await needAdmin(req);
+    const u = await needAdmin(req);
+    const cur = (await q("select * from updates where id=$1", [id]))[0];
+    if (!cur || !canManage(u, cur)) throw new HttpError(403, "You can only edit your section's posts");
     const title = str(b.title, 200)?.trim();
     if (!title) bad("Enter a title");
-    const kind = ["release", "notice", "alert"].includes(b.kind) ? b.kind : "notice";
-    const rows = await q("update updates set version=$1, title=$2, body=$3, kind=$4 where id=$5 returning *", [str(b.version, 20) || null, title, str(b.body, 5000), kind, id]);
-    if (b.notify) await broadcast({ title: "Updated: " + title, body: String(b.body || "").replace(/^[-*]\s*/gm, "• ").slice(0, 180), url: "/#/notifications" });
+    let kind = ["release", "notice", "alert"].includes(b.kind) ? b.kind : "notice";
+    if (kind === "release" && !u.is_super) kind = "notice";
+    const t = kind === "release" ? {} : cleanTarget(b, u);
+    const rows = await q("update updates set version=$1, title=$2, body=$3, kind=$4, target_section=$6, target_group=$7 where id=$5 returning *", [str(b.version, 20) || null, title, str(b.body, 5000), kind, id, t.s || null, t.g || null]);
+    if (b.notify) await broadcast({ title: targetLabel(t.s, t.g) + "Updated: " + title, body: String(b.body || "").replace(/^[-*]\s*/gm, "• ").slice(0, 180), url: "/#/notifications" }, t);
     return json({ update: rows[0] });
   },
   "PUT subject": async ({ req, body: b }, id) => {
     const u = await needUser(req);
     const s = (await q("select * from subjects where id=$1", [id]))[0];
-    if (!s || (s.owner_id ? s.owner_id !== u.id : !u.is_admin)) throw new HttpError(403, "You can't edit this subject");
+    if (!s || (s.owner_id ? s.owner_id !== u.id : !u.is_super)) throw new HttpError(403, "You can't edit this subject");
     const name = str(b.name, 100)?.trim();
     if (!name) bad("Enter a subject name");
     const rows = await q(`update subjects set name=$1, short=$2, code=$3, credits=$4, color=$5 where id=$6
@@ -653,18 +787,22 @@ const routes = {
     return json({ subject: rows[0] });
   },
   "PUT admin/user": async ({ req, body: b }) => {
-    await needAdmin(req);
+    const me = await needAdmin(req);
+    const target = (await q("select section from users where roll_no=$1", [normRoll(b.roll_no)]))[0];
+    if (!me.is_super && target?.section !== me.admin_scope) throw new HttpError(403, "You can only edit students in your section");
     const name = str(b.name, 80)?.trim();
     if (!name) bad("Enter a name");
     const card = { lbNick: cleanLine(b.nick, 24), lbTitle: cleanLine(b.title, 40) };
-    const rows = await q(`update users set name=$1, section=$2, prefs = prefs || $4::jsonb
+    const sg = cleanSecGrp(b.section, b.grp);
+    const rows = await q(`update users set name=$1, section=coalesce($2, section), grp=coalesce($6, grp), prefs = prefs || $4::jsonb
       || case when $5 and prefs->>'lbShow' = 'nick' then '{"lbShow":"roll"}'::jsonb else '{}'::jsonb end
-      where roll_no=$3 returning roll_no, name, section`, [name, str(b.section, 20) || null, normRoll(b.roll_no), JSON.stringify(card), !card.lbNick]);
+      where roll_no=$3 returning roll_no, name, section, grp`, [name, me.is_super ? sg.section : null, normRoll(b.roll_no), JSON.stringify(card), !card.lbNick, me.is_super ? sg.grp : null]);
     if (!rows.length) bad("No account with that roll number");
     return json({ user: rows[0] });
   },
   "POST admin/delete-user": async ({ req, body: b }) => {
     const me = await needAdmin(req);
+    if (!me.is_super) throw new HttpError(403, "Only the main admin can delete accounts");
     const roll = normRoll(b.roll_no);
     if (roll === me.roll_no) bad("You can't delete your own account");
     const keys = await q("select pathname from files f join users u on u.id=f.user_id where u.roll_no=$1", [roll]);
@@ -674,7 +812,9 @@ const routes = {
     return json({ user: rows[0] });
   },
   "DELETE update": async ({ req }, id) => {
-    await needAdmin(req);
+    const u = await needAdmin(req);
+    const cur = (await q("select * from updates where id=$1", [id]))[0];
+    if (cur && !canManage(u, cur)) throw new HttpError(403, "You can only delete your section's posts");
     await q("delete from updates where id=$1", [id]);
     return json({ ok: true });
   },
@@ -682,21 +822,32 @@ const routes = {
     const u = await needUser(req);
     if (!u.is_admin) throw new HttpError(403, "Only admins can set batch deadlines");
     if (!KINDS.includes(b.kind)) bad("Unknown assessment type");
+    // editing an existing row (by id) may change its audience; otherwise target comes from the body
+    const t = cleanTarget(b, u);
+    if (b.id) {
+      const cur = (await q("select * from batch_deadlines where id=$1", [b.id]))[0];
+      if (cur && !canManage(u, cur)) throw new HttpError(403, "You can only change your section's deadlines");
+      if (cur) await q("delete from batch_deadlines where id=$1", [b.id]);
+    }
     if (!b.due_date && !b.note) {
-      await q("delete from batch_deadlines where subject_id=$1 and kind=$2", [b.subject_id, b.kind]);
+      if (!b.id) await q("delete from batch_deadlines where subject_id=$1 and kind=$2 and coalesce(target_section,'')=$3 and coalesce(target_group,'')=$4", [b.subject_id, b.kind, t.s || "", t.g || ""]);
       return json({ deadline: null });
     }
-    const rows = await q(`insert into batch_deadlines (subject_id, kind, due_date, note) values ($1,$2,$3,$4)
-      on conflict (subject_id, kind) do update set due_date=excluded.due_date, note=excluded.note, updated_at=now() returning *`,
-      [b.subject_id, b.kind, dateOrNull(b.due_date), str(b.note, 300)]);
+    const rows = await q(`insert into batch_deadlines (subject_id, kind, due_date, note, target_section, target_group) values ($1,$2,$3,$4,$5,$6)
+      on conflict (subject_id, kind, (coalesce(target_section,'')), (coalesce(target_group,''))) do update set due_date=excluded.due_date, note=excluded.note, updated_at=now() returning *`,
+      [b.subject_id, b.kind, dateOrNull(b.due_date), str(b.note, 300), t.s, t.g]);
     const sj = (await q("select short from subjects where id=$1", [b.subject_id]))[0];
-    await announce(`${sj?.short || ""} ${b.kind.replace(/(\d)/, " $1")}: ${b.due_date ? "due " + fmtD(b.due_date) : "update"}`, str(b.note, 300) || "", b.notify !== false, "/#/subject/" + b.subject_id);
+    await announce(`${sj?.short || ""} ${b.kind.replace(/(\d)/, " $1")}: ${b.due_date ? "due " + fmtD(b.due_date) : "update"}`, str(b.note, 300) || "", b.notify !== false, "/#/subject/" + b.subject_id, t, u.roll_no);
     return json({ deadline: rows[0] });
   },
   "POST admin/reset": async ({ req, body: b }) => {
     const u = await needUser(req);
     if (!u.is_admin) throw new HttpError(403, "Admins only");
     if (String(b.password || "").length < 6) bad("Temporary password must be at least 6 characters");
+    if (!u.is_super) {
+      const t = (await q("select section from users where roll_no=$1", [normRoll(b.roll_no)]))[0];
+      if (t?.section !== u.admin_scope) throw new HttpError(403, "You can only reset passwords in your section");
+    }
     const rows = await q("update users set password_hash=$1 where roll_no=$2 returning roll_no, name", [await bcrypt.hash(String(b.password), 10), normRoll(b.roll_no)]);
     if (!rows.length) bad("No account with that roll number");
     return json({ user: rows[0] });
@@ -704,12 +855,74 @@ const routes = {
   "GET admin/users": async ({ req }) => {
     const u = await needUser(req);
     if (!u.is_admin) throw new HttpError(403, "Admins only");
-    return json({ users: await q(`select u.roll_no, u.name, u.section, u.created_at, u.prefs->>'lbNick' as nick, u.prefs->>'lbTitle' as title, coalesce(u.prefs->>'lbShow','roll') as show,
+    return json({ users: await q(`select u.roll_no, u.name, u.section, u.grp, u.created_at, u.prefs->>'lbNick' as nick, u.prefs->>'lbTitle' as title, coalesce(u.prefs->>'lbShow','roll') as show,
         (select count(*) from assessments a where a.user_id=u.id and a.submitted)::int as submitted,
         (select count(*) from files f where f.user_id=u.id)::int as files
-      from users u order by u.roll_no`) });
+      from users u order by u.section nulls last, u.roll_no`) });
+  },
+
+  // ---- admins (main admin only)
+  "GET admins": async ({ req }) => {
+    await needSuper(req);
+    return json({ admins: await q("select a.roll_no, a.scope_section, a.created_at, u.name from admins a left join users u on u.roll_no=a.roll_no order by a.created_at") });
+  },
+  "POST admins": async ({ req, body: b }) => {
+    const me = await needSuper(req);
+    const roll = normRoll(b.roll_no);
+    if (!roll) bad("Enter a roll number");
+    if (ADMIN_ROLLS().includes(roll)) bad("That's already the main admin");
+    let scope = String(b.scope_section || "").toUpperCase();
+    if (scope === "ALL") scope = null; else if (!SECTIONS[scope]) bad("Pick a section");
+    const rows = await q(`insert into admins (roll_no, scope_section, added_by) values ($1,$2,$3)
+      on conflict (roll_no) do update set scope_section=excluded.scope_section returning *`, [roll, scope, me.roll_no]);
+    const who = (await q("select name from users where roll_no=$1", [roll]))[0];
+    return json({ admin: { ...rows[0], name: who?.name || null } });
+  },
+  "DELETE admins": async ({ req }, roll) => {
+    await needSuper(req);
+    await q("delete from admins where roll_no=$1", [normRoll(roll)]);
+    return json({ ok: true });
+  },
+
+  // ---- feedback about the platform
+  "POST feedback": async ({ req, body: b }) => {
+    const u = await needUser(req);
+    const msg = str(b.message, 3000)?.trim();
+    if (!msg || msg.length < 3) bad("Write a few words of feedback");
+    const cat = FB_CATS.includes(b.category) ? b.category : "idea";
+    const rating = Number.isInteger(+b.rating) && +b.rating >= 1 && +b.rating <= 5 ? +b.rating : null;
+    const recent = (await q("select count(*)::int n from feedback where user_id=$1 and created_at > now() - interval '1 hour'", [u.id]))[0].n;
+    if (recent >= 10) bad("That's a lot of feedback for one hour — try again a bit later");
+    const rows = await q("insert into feedback (user_id, category, rating, message) values ($1,$2,$3,$4) returning *", [u.id, cat, rating, msg]);
+    // ping the main admin(s)
+    if (VAPID_PUBLIC) {
+      const subs = await q("select p.* from push_subs p join users x on x.id=p.user_id where x.roll_no = any($1::text[])", [ADMIN_ROLLS()]);
+      await sendMany(subs, { title: `💬 New feedback (${cat})`, body: msg.slice(0, 160), url: "/#/feedback" });
+    }
+    return json({ feedback: rows[0] });
+  },
+  "GET feedback": async ({ req }) => {
+    const u = await needUser(req);
+    if (u.is_super) return json({ all: true, items: await q(`select f.*, u.roll_no, u.name, u.section from feedback f left join users u on u.id=f.user_id order by f.created_at desc limit 300`) });
+    return json({ all: false, items: await q("select * from feedback where user_id=$1 order by created_at desc", [u.id]) });
+  },
+  "PUT feedback": async ({ req, body: b }, id) => {
+    await needSuper(req);
+    const status = FB_STATUS.includes(b.status) ? b.status : "new";
+    const rows = await q("update feedback set status=$1, reply=$2, updated_at=now() where id=$3 returning *", [status, str(b.reply, 2000)?.trim() || null, id]);
+    if (!rows.length) throw new HttpError(404, "Feedback not found");
+    if (b.reply && b.notifyUser !== false && rows[0].user_id) await pushToUser(rows[0].user_id, { title: "Reply to your feedback", body: String(b.reply).slice(0, 160), url: "/#/feedback" });
+    return json({ feedback: rows[0] });
+  },
+  "DELETE feedback": async ({ req }, id) => {
+    const u = await needUser(req);
+    if (u.is_super) await q("delete from feedback where id=$1", [id]);
+    else await q("delete from feedback where id=$1 and user_id=$2 and status='new'", [id, u.id]);
+    return json({ ok: true });
   },
 };
+const FB_CATS = ["bug", "idea", "design", "content", "praise", "other"];
+const FB_STATUS = ["new", "seen", "planned", "done", "wontfix"];
 
 const STATIC = {
   "/app.js": [APP_JS, "text/javascript; charset=utf-8"],
