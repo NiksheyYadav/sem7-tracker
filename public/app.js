@@ -521,10 +521,8 @@ function pageLeaderboard() {
   const head = `<div class="lb-top">
       <div><div class="lb-kicker">Sem VII · B.Tech CSE (DS)</div><h1 class="lb-title" data-text="LEADERBOARD">LEADERBOARD</h1>
         <p class="lb-sub">Tick your reports, PPTs, vivas and syllabus topics. Climb the board.</p></div>
-      <div class="lb-switch" role="group" aria-label="Show me on the leaderboard as">
-        <span>Show me as</span>
-        <button data-lbshow="roll" class="${show === "roll" ? "on" : ""}">Roll no.</button><button data-lbshow="name" class="${show === "name" ? "on" : ""}">Name</button>
-      </div></div>`;
+      <button class="lb-edit" id="lbEdit"><span class="lb-av mini" style="--s:30px"><span>✎</span></span><span><b>Edit my card</b><small>${{ roll: "Showing roll no.", name: "Showing name", nick: "Showing nickname" }[show] || "Showing roll no."}${prefs().lbTitle ? " · " + esc(prefs().lbTitle) : ""}</small></span></button>
+</div>`;
   if (!LB) return `<div class="lb">${lbBg()}${head}<div class="lb-loading"><div class="lb-spin"></div>Loading the rankings…</div></div>`;
   const L = LB.list, max = Math.max(1, ...L.map((x) => x.score));
   const me = L.find((x) => x.me);
@@ -539,6 +537,7 @@ function pageLeaderboard() {
       ${place === 1 ? `<svg class="crown" viewBox="0 0 64 44"><path d="M4 40 L8 10 L22 24 L32 4 L42 24 L56 10 L60 40 Z" fill="url(#cg)" stroke="#7a4b00" stroke-width="2" stroke-linejoin="round"/><circle cx="32" cy="4" r="4" fill="#fff6c9"/><circle cx="8" cy="10" r="3.4" fill="#fff6c9"/><circle cx="56" cy="10" r="3.4" fill="#fff6c9"/><defs><linearGradient id="cg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff1a8"/><stop offset=".5" stop-color="#ffc83d"/><stop offset="1" stop-color="#e08a00"/></linearGradient></defs></svg>` : ""}
       <div class="pod-ring">${lbAvatar(x, place === 1 ? 92 : 74)}</div>
       <div class="pod-name">${esc(x.label)}${x.me ? ' <em>you</em>' : ""}</div>
+      ${x.title ? `<div class="pod-title">${esc(x.title)}</div>` : ""}
       <div class="pod-score"><b data-count="${x.score}">0</b> pts</div>
       <div class="pod-badges">${x.badges.map((b) => `<span title="${BADGES[b][1]}">${BADGES[b][0]}</span>`).join("")}</div>
       <div class="pillar"><span>${place}</span></div>
@@ -547,7 +546,7 @@ function pageLeaderboard() {
   const rest = L.filter((x) => !top.includes(x));
   const rows = rest.map((x, i) => `<div class="lb-row ${x.me ? "me" : ""} ${x.score ? "" : "zero"}" style="--d:${Math.min(i, 20) * 0.05 + 0.5}s">
       <div class="rk">${x.score ? "#" + x.rank : "–"}</div>${lbAvatar(x, 40)}
-      <div class="who"><b>${esc(x.label)}${x.me ? ' <em>you</em>' : ""}</b>
+      <div class="who"><b>${esc(x.label)}${x.me ? ' <em>you</em>' : ""}</b>${x.title ? `<span class="lb-tl">${esc(x.title)}</span>` : ""}
         <div class="bar"><i style="--w:${(x.score / max) * 100}%"></i></div></div>
       <div class="bd">${x.badges.map((b) => `<span title="${BADGES[b][1]}">${BADGES[b][0]}</span>`).join("")}</div>
       <div class="pts"><b data-count="${x.score}">0</b><small>pts</small></div></div>`).join("");
@@ -566,9 +565,53 @@ function pageLeaderboard() {
       <b>How points work</b>
       <span>📄 Report <i>+10</i></span><span>📊 PPT <i>+10</i></span><span>🎤 Viva <i>+10</i></span><span>✅ Submitted <i>+20</i></span><span>📚 Syllabus topic <i>+5</i></span>
       <div class="lb-legend">${Object.values(BADGES).map(([e, t]) => `<span>${e} ${t}</span>`).join("")}</div>
-      <div class="lb-fine">Only your name or roll number and your points are shown. Marks are never shown. Custom subjects don't count.</div>
+      <div class="lb-fine">Only what you choose on your card (roll no., name or nickname + title) and your points are shown. Marks are never shown. Custom subjects don't count.</div>
     </div>
   </div>`;
+}
+const TITLE_IDEAS = ["Topper in making 📈", "Last bench legend 🪑", "Viva warrior 🎤", "Deadline se 1 min pehle ⏱️", "PPT ka baadshah 📊", "Khapittar 🤣", "Sleeping through UA-3 😴", "Report likh raha hu... ✍️"];
+function lbCardModal() {
+  const p = prefs();
+  let st = { show: p.lbShow || "roll", nick: p.lbNick || "", title: p.lbTitle || "" };
+  const bg = document.createElement("div");
+  bg.className = "modal-bg";
+  const label = () => (st.show === "nick" && st.nick.trim() ? st.nick.trim() : st.show === "name" ? S.user.name : S.user.roll_no);
+  bg.innerHTML = `<form class="modal lb-modal"><h3>Your leaderboard card</h3>
+    <div class="lb-preview"><div class="lb-av" style="--s:52px"><span></span></div><div style="min-width:0"><b class="pv-name"></b><div class="pv-title"></div></div><div class="pv-pts">🏆</div></div>
+    <div class="f"><span>Show me as</span><div class="seg3">${[["roll", "Roll no."], ["name", "Name"], ["nick", "Nickname"]].map(([v, l]) => `<button type="button" data-v="${v}">${l}</button>`).join("")}</div></div>
+    <label class="f nick-f"><span>Nickname <small class="muted">(max 24)</small></span><input class="in" name="nick" maxlength="40" placeholder="e.g. Khapittar" value="${esc(st.nick)}"></label>
+    <label class="f"><span>Title under your name <small class="muted">(like WhatsApp About · max 40)</small></span><input class="in" name="title" maxlength="80" placeholder="e.g. Viva warrior 🎤" value="${esc(st.title)}"></label>
+    <div class="ideas">${TITLE_IDEAS.map((t) => `<button type="button" class="pill" data-idea="${esc(t)}">${esc(t)}</button>`).join("")}</div>
+    <p class="muted small" style="margin:8px 0 0">Everyone in the batch can see this. Keep it fun, not offensive. The admin can clear titles.</p>
+    <div class="row wrap" style="margin-top:12px"><button class="btn grad">Save card</button><button type="button" class="btn ghost" data-close>Cancel</button>${st.title || st.nick ? `<button type="button" class="btn danger" data-clear style="margin-left:auto">Clear</button>` : ""}</div></form>`;
+  document.body.appendChild(bg);
+  const f = bg.querySelector("form"), chars = (v, n) => [...v].slice(0, n).join("");
+  const paint = () => {
+    const l = label();
+    bg.querySelector(".pv-name").textContent = l;
+    bg.querySelector(".pv-title").textContent = st.title || "No title yet";
+    bg.querySelector(".pv-title").style.opacity = st.title ? 1 : 0.5;
+    bg.querySelector(".lb-preview .lb-av span").textContent = /^\d+$/.test(l) ? l.slice(-3) : l.split(/\s+/).map((w) => [...w][0] || "").slice(0, 2).join("").toUpperCase();
+    bg.querySelectorAll(".seg3 button").forEach((b) => b.classList.toggle("on", b.dataset.v === st.show));
+    bg.querySelector(".nick-f").style.display = st.show === "nick" ? "" : "none";
+  };
+  bg.querySelectorAll(".seg3 button").forEach((b) => (b.onclick = () => { st.show = b.dataset.v; paint(); if (st.show === "nick") f.nick.focus(); }));
+  f.nick.oninput = () => { st.nick = chars(f.nick.value, 24); paint(); };
+  f.title.oninput = () => { st.title = chars(f.title.value, 40); paint(); };
+  bg.querySelectorAll("[data-idea]").forEach((b) => (b.onclick = () => { f.title.value = st.title = b.dataset.idea; paint(); }));
+  const close = () => bg.remove();
+  bg.onclick = (e) => { if (e.target === bg) close(); };
+  bg.querySelector("[data-close]").onclick = close;
+  const save = async (card) => {
+    try {
+      const r = await api("POST", "leaderboard/card", card);
+      S.user.prefs = r.prefs; LB = null; lbConfettiDone = true; close(); render(); toast("Card updated ✨");
+    } catch (e) { toast(e.message, true); }
+  };
+  const clr = bg.querySelector("[data-clear]");
+  if (clr) clr.onclick = () => save({ show: st.show === "nick" ? "roll" : st.show, nick: "", title: "" });
+  f.onsubmit = (e) => { e.preventDefault(); save(st); };
+  paint();
 }
 function lbBg() {
   return `<div class="lb-bg" aria-hidden="true"><i class="a1"></i><i class="a2"></i><i class="a3"></i><div class="stars"></div><div class="floor"></div></div><canvas class="lb-confetti"></canvas>`;
@@ -895,7 +938,8 @@ function formModal(title, fields, onSave, extra = "") {
 function wireUsers() {
   document.querySelectorAll("[data-edit-user]").forEach((b) => (b.onclick = () => {
     const u = window._users.find((x) => x.roll_no === b.dataset.editUser);
-    formModal(`Edit account · ${u.roll_no}`, [{ name: "name", label: "Name", value: u.name, required: true }, { name: "section", label: "Section", value: u.section || "" }], async (fd) => {
+    formModal(`Edit account · ${u.roll_no}`, [{ name: "name", label: "Name", value: u.name, required: true }, { name: "section", label: "Section", value: u.section || "" },
+      { name: "nick", label: "Leaderboard nickname (empty = remove)", value: u.nick || "" }, { name: "title", label: "Leaderboard title (empty = remove)", value: u.title || "" }], async (fd) => {
       await api("PUT", "admin/user", { roll_no: u.roll_no, ...fd }); toast("Account updated"); document.getElementById("loadUsers")?.click();
     });
   }));
@@ -1053,11 +1097,9 @@ function wirePage() {
     } catch (err) { toast(err.message, true); }
   };
 
-  // leaderboard display choice
-  on("[data-lbshow]", (b) => (b.onclick = async () => {
-    await savePrefs({ lbShow: b.dataset.lbshow });
-    LB = null; lbConfettiDone = true; render(); toast(b.dataset.lbshow === "name" ? "You'll appear by name" : "You'll appear by roll number");
-  }));
+  // leaderboard card
+  const lbE = document.getElementById("lbEdit");
+  if (lbE) lbE.onclick = lbCardModal;
 
   // notifications
   const pOn = document.getElementById("pushOn");
@@ -1202,7 +1244,7 @@ function wirePage() {
     try {
       const r = await api("GET", "admin/users");
       window._users = r.users;
-      document.getElementById("usersBox").innerHTML = `<button class="btn sm ghost" id="loadUsers" style="margin-bottom:8px">↻ Refresh</button><div class="scroll"><table class="t"><thead><tr><th>Roll</th><th>Name</th><th>Sec</th><th>Done</th><th>Files</th><th>Joined</th><th></th></tr></thead><tbody>${r.users.map((u) => `<tr><td>${esc(u.roll_no)}</td><td>${esc(u.name)}</td><td>${esc(u.section || "")}</td><td>${u.submitted}</td><td>${u.files}</td><td class="muted small">${fmtDate(u.created_at, false)}</td>
+      document.getElementById("usersBox").innerHTML = `<button class="btn sm ghost" id="loadUsers" style="margin-bottom:8px">↻ Refresh</button><div class="scroll"><table class="t"><thead><tr><th>Roll</th><th>Name</th><th>Sec</th><th>Done</th><th>Files</th><th>Joined</th><th></th></tr></thead><tbody>${r.users.map((u) => `<tr><td>${esc(u.roll_no)}</td><td>${esc(u.name)}${u.nick || u.title ? `<div class="muted small">${u.nick ? "“" + esc(u.nick) + "” " : ""}${u.title ? "· " + esc(u.title) : ""}</div>` : ""}</td><td>${esc(u.section || "")}</td><td>${u.submitted}</td><td>${u.files}</td><td class="muted small">${fmtDate(u.created_at, false)}</td>
         <td style="white-space:nowrap"><button class="btn sm ghost" data-edit-user="${esc(u.roll_no)}">Edit</button>${u.roll_no === S.user.roll_no ? "" : ` <button class="btn sm danger" data-del-user="${esc(u.roll_no)}">✕</button>`}</td></tr>`).join("")}</tbody></table></div>`;
       wireUsers();
       document.getElementById("loadUsers").onclick = lu.onclick;

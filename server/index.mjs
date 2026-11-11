@@ -136,6 +136,11 @@ async function needAdmin(req) {
   return u;
 }
 const fmtD = (iso) => new Date(iso + "T00:00:00Z").toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "short", timeZone: "UTC" });
+// one-line user text: strip control chars / zero-width / bidi tricks, collapse spaces, cap length (by characters, emoji-safe)
+function cleanLine(v, max) {
+  const t = String(v ?? "").replace(/[\u0000-\u001f\u007f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g, "").replace(/\s+/g, " ").trim();
+  return [...t].slice(0, max).join("");
+}
 function cleanEvent(b) {
   const title = str(b.title, 150)?.trim();
   if (!title) bad("Enter a title");
@@ -477,7 +482,7 @@ const routes = {
          t as (
            select tp.user_id, count(*) n from topic_progress tp join subjects sj on sj.id = tp.subject_id and sj.owner_id is null
            where tp.done group by tp.user_id)
-         select u.id, u.roll_no, u.name, coalesce(u.prefs->>'lbShow', 'roll') as show,
+         select u.id, u.roll_no, u.name, coalesce(u.prefs->>'lbShow', 'roll') as show, u.prefs->>'lbNick' as nick, u.prefs->>'lbTitle' as title,
            coalesce(a.r,0)::int r, coalesce(a.p,0)::int p, coalesce(a.v,0)::int v, coalesce(a.s,0)::int s, coalesce(t.n,0)::int topics, a.last
          from users u left join a on a.user_id = u.id left join t on t.user_id = u.id`),
       q(`select coalesce(sum(jsonb_array_length(un->'topics')),0)::int n from subjects sj, jsonb_array_elements(sj.units) un where sj.owner_id is null and sj.kind <> 'elective'`),
@@ -491,12 +496,22 @@ const routes = {
       if (x.r >= 5) badges.push("reports");
       if (x.v >= 5) badges.push("viva");
       if (tot[0].n && x.topics / tot[0].n >= 0.75) badges.push("syllabus");
-      return { me: x.id === u.id, label: x.show === "name" ? x.name : x.roll_no, show: x.show, score,
+      const label = x.show === "nick" && x.nick ? x.nick : x.show === "name" ? x.name : x.roll_no;
+      return { me: x.id === u.id, label, title: x.title || "", show: x.show, score,
         reports: x.r, ppts: x.p, vivas: x.v, submitted: x.s, topics: x.topics, badges };
     }).sort((a, b) => b.score - a.score || b.submitted - a.submitted || a.label.localeCompare(b.label));
     let rank = 0, prev = null;
     list.forEach((x, i) => { if (x.score !== prev) { rank = i + 1; prev = x.score; } x.rank = rank; });
     return json({ list, totalTopics: tot[0].n, updated: new Date().toISOString() });
+  },
+
+  "POST leaderboard/card": async ({ req, body: b }) => {
+    const u = await needUser(req);
+    const show = ["roll", "name", "nick"].includes(b.show) ? b.show : "roll";
+    const nick = cleanLine(b.nick, 24), title = cleanLine(b.title, 40);
+    if (show === "nick" && !nick) bad("Write a nickname, or pick roll number / name");
+    const rows = await q("update users set prefs = prefs || $1::jsonb where id=$2 returning prefs", [JSON.stringify({ lbShow: show, lbNick: nick, lbTitle: title }), u.id]);
+    return json({ prefs: rows[0].prefs });
   },
 
   // ---- study notes
@@ -620,7 +635,10 @@ const routes = {
     await needAdmin(req);
     const name = str(b.name, 80)?.trim();
     if (!name) bad("Enter a name");
-    const rows = await q("update users set name=$1, section=$2 where roll_no=$3 returning roll_no, name, section", [name, str(b.section, 20) || null, normRoll(b.roll_no)]);
+    const card = { lbNick: cleanLine(b.nick, 24), lbTitle: cleanLine(b.title, 40) };
+    const rows = await q(`update users set name=$1, section=$2, prefs = prefs || $4::jsonb
+      || case when $5 and prefs->>'lbShow' = 'nick' then '{"lbShow":"roll"}'::jsonb else '{}'::jsonb end
+      where roll_no=$3 returning roll_no, name, section`, [name, str(b.section, 20) || null, normRoll(b.roll_no), JSON.stringify(card), !card.lbNick]);
     if (!rows.length) bad("No account with that roll number");
     return json({ user: rows[0] });
   },
@@ -665,7 +683,7 @@ const routes = {
   "GET admin/users": async ({ req }) => {
     const u = await needUser(req);
     if (!u.is_admin) throw new HttpError(403, "Admins only");
-    return json({ users: await q(`select u.roll_no, u.name, u.section, u.created_at,
+    return json({ users: await q(`select u.roll_no, u.name, u.section, u.created_at, u.prefs->>'lbNick' as nick, u.prefs->>'lbTitle' as title, coalesce(u.prefs->>'lbShow','roll') as show,
         (select count(*) from assessments a where a.user_id=u.id and a.submitted)::int as submitted,
         (select count(*) from files f where f.user_id=u.id)::int as files
       from users u order by u.roll_no`) });
