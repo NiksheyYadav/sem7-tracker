@@ -70,6 +70,22 @@ function verifyToken(tok) {
 }
 const ADMIN_ROLLS = () => (process.env.ADMIN_ROLLS || "").split(",").map((s) => s.trim()).filter(Boolean);
 const KINDS = ["TA1", "TA2", "TA3", "TA4", "TA5", "ERLA1", "ERLA2", "PA"];
+// custom assessment types (e.g. IT2 "Internal" / "External") use keys like "Xinternal"
+const isKind = (k) => KINDS.includes(k) || /^X[a-z0-9]{1,24}$/.test(String(k || ""));
+const kindKey = (label) => "X" + String(label || "").toLowerCase().replace(/[^a-z0-9]+/g, "").slice(0, 24);
+function kindLabelOf(k, subj) {
+  if (KINDS.includes(k)) return k.replace(/(\d)/, " $1");
+  return (subj?.custom_kinds || []).find((x) => x.k === k)?.label || String(k).slice(1);
+}
+function cleanKindList(list) {
+  const out = [], seen = new Set();
+  for (const x of Array.isArray(list) ? list.slice(0, 12) : []) {
+    const label = cleanLine(x?.label, 24); if (!label) continue;
+    const k = kindKey(label); if (k.length < 2 || seen.has(k)) continue;
+    seen.add(k); out.push({ k, label });
+  }
+  return out;
+}
 const COOKIE = "tk";
 const MAX_FILE = 100 * 1024 * 1024; // 100 MB
 // content hash, so every instance agrees on the version and it only changes when the code does
@@ -260,7 +276,7 @@ async function runReminders(scheduledAt) {
   const users = await q("select u.id, u.prefs, u.section, u.grp from users u where exists (select 1 from push_subs p where p.user_id=u.id)");
   if (!users.length) return { users: 0, sent: 0 };
   const [subjects, exams, deadlines, events] = await Promise.all([
-    q("select id, short, kind, owner_id from subjects"),
+    q("select id, short, kind, owner_id, custom_kinds from subjects"),
     q("select * from exams where exam_date = any($1::date[])", [dates]),
     q("select * from batch_deadlines where due_date = any($1::date[])", [dates]),
     q("select * from events where event_date = any($1::date[])", [dates]),
@@ -279,12 +295,12 @@ async function runReminders(scheduledAt) {
     for (const e of exams) if (visible(e.subject_id) && visibleTo(u, e)) items.push([e.exam_date, `${sById[e.subject_id].short} ${e.name} exam${e.slot ? " (" + e.slot + ")" : ""}`]);
     for (const e of events) if ((e.user_id === u.id || (e.user_id === null && visibleTo(u, e))) && (!e.subject_id || e.user_id || visible(e.subject_id))) items.push([e.event_date, e.title + (e.event_time ? " · " + e.event_time : "")]);
     const mineMap = Object.fromEntries(mine.map((a) => [a.subject_id + ":" + a.kind, a]));
-    for (const a of mine) if (a.due_date && dates.includes(a.due_date) && !a.submitted && visible(a.subject_id)) items.push([a.due_date, `${sById[a.subject_id]?.short} ${a.kind}${a.topic ? " — " + a.topic : ""} due`]);
+    for (const a of mine) if (a.due_date && dates.includes(a.due_date) && !a.submitted && visible(a.subject_id)) items.push([a.due_date, `${sById[a.subject_id]?.short} ${kindLabelOf(a.kind, sById[a.subject_id])}${a.topic ? " — " + a.topic : ""} due`]);
     for (const d of deadlines) {
       if (!visibleTo(u, d)) continue;
       const a = mineMap[d.subject_id + ":" + d.kind];
       if (!visible(d.subject_id) || a?.submitted || a?.due_date) continue;
-      items.push([d.due_date, `${sById[d.subject_id]?.short} ${d.kind} due${d.note ? " — " + d.note : ""}`]);
+      items.push([d.due_date, `${sById[d.subject_id]?.short} ${kindLabelOf(d.kind, sById[d.subject_id])} due${d.note ? " — " + d.note : ""}`]);
     }
     for (const a of asg) items.push([a.due_date, `Assignment: ${a.title}`]);
     if (!items.length) continue;
@@ -387,7 +403,7 @@ const routes = {
   "GET bootstrap": async ({ req }) => {
     const u = await needUser(req);
     const [subjects, deadlines, assessments, assignments, todos, topics, files, batch, exams, events, sharedNotes, updates, subs] = await Promise.all([
-      q(`select id, code, name, short, credits, kind, is_default, units, color, owner_id, sort, (notes_md is not null) as has_db_notes
+      q(`select id, code, name, short, credits, kind, is_default, units, color, owner_id, sort, custom_kinds, default_kinds, (notes_md is not null) as has_db_notes
          from subjects where owner_id is null or owner_id=$1 order by sort, id`, [u.id]),
       u.is_admin ? q("select * from batch_deadlines") : forUser(`select * from batch_deadlines d where ${VIS("d")}`, u),
       q("select * from assessments where user_id=$1", [u.id]),
@@ -412,7 +428,7 @@ const routes = {
 
   "PUT assessment": async ({ req, body: b }) => {
     const u = await needUser(req);
-    if (!KINDS.includes(b.kind)) bad("Unknown assessment type");
+    if (!isKind(b.kind)) bad("Unknown assessment type");
     await subjectVisibleTo(u, b.subject_id);
     const rows = await q(
       `insert into assessments (user_id, subject_id, kind, topic, due_date, report, ppt, viva, submitted, marks, max_marks, notes, updated_at)
@@ -498,7 +514,7 @@ const routes = {
     const name = (url.searchParams.get("name") || "file").replace(/[\\/\u0000-\u001f]+/g, "_").slice(-150);
     const sid = numOrNull(url.searchParams.get("subject_id"));
     const kind = url.searchParams.get("kind") || null;
-    if (kind && !KINDS.includes(kind)) bad("Unknown assessment type");
+    if (kind && !isKind(kind)) bad("Unknown assessment type");
     if (sid) await subjectVisibleTo(u, sid);
     const len = Number(req.headers.get("content-length") || 0);
     if (len > MAX_FILE) bad("File is over 100 MB");
@@ -520,7 +536,7 @@ const routes = {
     const size = Number(b.size || 0);
     if (!size) bad("Empty file");
     if (size > MAX_FILE) bad("File is over 100 MB");
-    if (b.kind && !KINDS.includes(b.kind)) bad("Unknown assessment type");
+    if (b.kind && !isKind(b.kind)) bad("Unknown assessment type");
     if (b.subject_id) await subjectVisibleTo(u, b.subject_id);
     const used = (await q("select coalesce(sum(size),0)::bigint s from files where user_id=$1", [u.id]))[0].s;
     if (used + size > 1024 * 1024 * 1024) bad("You've used your 1 GB — delete some files first");
@@ -536,7 +552,7 @@ const routes = {
     const size = await s3Head(key);
     if (size <= 0) bad("Upload didn't reach storage — try again");
     if (size > MAX_FILE) { await s3Del(key); bad("File is over 100 MB"); }
-    if (b.kind && !KINDS.includes(b.kind)) bad("Unknown assessment type");
+    if (b.kind && !isKind(b.kind)) bad("Unknown assessment type");
     if (b.subject_id) await subjectVisibleTo(u, b.subject_id);
     if ((await q("select 1 from files where pathname=$1", [key])).length) bad("Already saved");
     const name = key.split("/").pop();
@@ -783,8 +799,20 @@ const routes = {
     const name = str(b.name, 100)?.trim();
     if (!name) bad("Enter a subject name");
     const rows = await q(`update subjects set name=$1, short=$2, code=$3, credits=$4, color=$5 where id=$6
-      returning id, code, name, short, credits, kind, is_default, units, color, owner_id, sort`,
+      returning id, code, name, short, credits, kind, is_default, units, color, owner_id, sort, custom_kinds, default_kinds`,
       [name, str(b.short, 14)?.trim() || name.slice(0, 12), str(b.code, 20)?.trim() || null, numOrNull(b.credits), /^#[0-9a-f]{6}$/i.test(b.color || "") ? b.color : s.color, id]);
+    return json({ subject: rows[0] });
+  },
+  // which assessments a subject has for everyone (main admin for shared subjects, owner for personal ones)
+  "PUT subject-kinds": async ({ req, body: b }, id) => {
+    const u = await needUser(req);
+    const s = (await q("select * from subjects where id=$1", [id]))[0];
+    if (!s || (s.owner_id ? s.owner_id !== u.id : !u.is_super)) throw new HttpError(403, "Only the main admin can change this subject's assessments");
+    const custom = cleanKindList(b.custom_kinds);
+    const def = Array.isArray(b.default_kinds) ? KINDS.filter((k) => b.default_kinds.includes(k)) : null;
+    if (def && !def.length && !custom.length) bad("Keep at least one assessment");
+    const rows = await q("update subjects set custom_kinds=$1, default_kinds=$2 where id=$3 returning id, custom_kinds, default_kinds",
+      [JSON.stringify(custom), def ? JSON.stringify(def) : null, id]);
     return json({ subject: rows[0] });
   },
   "PUT admin/user": async ({ req, body: b }) => {
@@ -822,7 +850,7 @@ const routes = {
   "PUT deadline": async ({ req, body: b }) => {
     const u = await needUser(req);
     if (!u.is_admin) throw new HttpError(403, "Only admins can set batch deadlines");
-    if (!KINDS.includes(b.kind)) bad("Unknown assessment type");
+    if (!isKind(b.kind)) bad("Unknown assessment type");
     // editing an existing row (by id) may change its audience; otherwise target comes from the body
     const t = cleanTarget(b, u);
     if (b.id) {
@@ -837,8 +865,8 @@ const routes = {
     const rows = await q(`insert into batch_deadlines (subject_id, kind, due_date, note, target_section, target_group) values ($1,$2,$3,$4,$5,$6)
       on conflict (subject_id, kind, (coalesce(target_section,'')), (coalesce(target_group,''))) do update set due_date=excluded.due_date, note=excluded.note, updated_at=now() returning *`,
       [b.subject_id, b.kind, dateOrNull(b.due_date), str(b.note, 300), t.s, t.g]);
-    const sj = (await q("select short from subjects where id=$1", [b.subject_id]))[0];
-    await announce(`${sj?.short || ""} ${b.kind.replace(/(\d)/, " $1")}: ${b.due_date ? "due " + fmtD(b.due_date) : "update"}`, str(b.note, 300) || "", b.notify !== false, "/#/subject/" + b.subject_id, t, u.roll_no);
+    const sj = (await q("select short, custom_kinds from subjects where id=$1", [b.subject_id]))[0];
+    await announce(`${sj?.short || ""} ${kindLabelOf(b.kind, sj)}: ${b.due_date ? "due " + fmtD(b.due_date) : "update"}`, str(b.note, 300) || "", b.notify !== false, "/#/subject/" + b.subject_id, t, u.roll_no);
     return json({ deadline: rows[0] });
   },
   "POST admin/reset": async ({ req, body: b }) => {

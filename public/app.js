@@ -157,7 +157,17 @@ function isVisible(s) {
 }
 const visibleSubjects = () => S.subjects.filter(isVisible);
 const subjById = (id) => S.subjects.find((s) => s.id === Number(id));
-function kindsFor(sid) { const k = (prefs().kinds || {})[sid]; return Array.isArray(k) && k.length ? S.kinds.filter((x) => k.includes(x)) : S.kinds; }
+// assessment types: the standard TA/ERLA/PA set + custom ones (subject-wide from admin, or personal)
+const myCKinds = (sid) => (prefs().ckinds || {})[sid] || [];
+function customKindsFor(sid) { const s = subjById(sid), seen = new Set(); return [...(s?.custom_kinds || []).map((x) => ({ ...x, all: true })), ...myCKinds(sid)].filter((x) => !seen.has(x.k) && seen.add(x.k)); }
+function kindLabel(k, sid) { return KIND_LABEL[k] || customKindsFor(sid).find((x) => x.k === k)?.label || String(k || "").slice(1); }
+function stdKindsFor(sid) {
+  const s = subjById(sid), inc = (prefs().kinds || {})[sid];
+  if (Array.isArray(inc)) return S.kinds.filter((x) => inc.includes(x));
+  return Array.isArray(s?.default_kinds) ? S.kinds.filter((x) => s.default_kinds.includes(x)) : S.kinds;
+}
+function kindsFor(sid) { const hide = (prefs().khide || {})[sid] || []; return [...stdKindsFor(sid), ...customKindsFor(sid).map((x) => x.k).filter((k) => !hide.includes(k))]; }
+const kindKey = (label) => "X" + String(label || "").toLowerCase().replace(/[^a-z0-9]+/g, "").slice(0, 24);
 function getA(sid, kind) {
   return S.assessments.find((a) => a.subject_id === sid && a.kind === kind) ||
     { subject_id: sid, kind, topic: "", due_date: null, report: false, ppt: false, viva: false, submitted: false, marks: null, max_marks: null, notes: "" };
@@ -183,7 +193,7 @@ function datedItems() {
   for (const e of myExams()) if (e.exam_date) { const s = subjById(e.subject_id); out.push({ date: dOnly(e.exam_date), type: "exam", s, title: `${s.short} ${e.name}`, time: e.slot, note: e.note, href: "#/exams", tg: e }); }
   for (const s of visibleSubjects()) for (const k of kindsFor(s.id)) {
     const a = getA(s.id, k), due = effDue(a);
-    if (due && !a.submitted) out.push({ date: due, type: a.due_date ? "assess" : "deadline", s, title: `${s.short} ${KIND_LABEL[k]} due${a.topic ? " — " + a.topic : ""}`, note: batchDL(s.id, k)?.note, href: `#/subject/${s.id}`, tg: a.due_date ? null : batchDL(s.id, k) });
+    if (due && !a.submitted) out.push({ date: due, type: a.due_date ? "assess" : "deadline", s, title: `${s.short} ${kindLabel(k, s.id)} due${a.topic ? " — " + a.topic : ""}`, note: batchDL(s.id, k)?.note, href: `#/subject/${s.id}`, tg: a.due_date ? null : batchDL(s.id, k) });
   }
   for (const a of S.assignments) if (!a.done && a.due_date) out.push({ date: dOnly(a.due_date), type: "asg", s: subjById(a.subject_id), title: `Assignment: ${a.title}`, href: "#/assignments" });
   for (const ev of S.events) {
@@ -366,7 +376,7 @@ function pageHome() {
 
 function subjCard(s) {
   const p = subjProgress(s), syl = syllabusProgress(s);
-  const pips = kindsFor(s.id).map((k) => { const sc = aScore(getA(s.id, k)); return `<i class="${sc >= 1 ? "full" : sc > 0 ? "half" : ""}" title="${KIND_LABEL[k]}"></i>`; }).join("");
+  const pips = kindsFor(s.id).map((k) => { const sc = aScore(getA(s.id, k)); return `<i class="${sc >= 1 ? "full" : sc > 0 ? "half" : ""}" title="${kindLabel(k, s.id)}"></i>`; }).join("");
   const nextEx = examsFor(s.id).filter((e) => e.exam_date && daysUntil(e.exam_date) >= 0).sort((a, b) => dOnly(a.exam_date).localeCompare(dOnly(b.exam_date)))[0];
   return `<div class="card subj" style="--c:${s.color || "#6366f1"}">
     <a class="cover" href="#/subject/${s.id}" aria-label="${esc(s.name)}"></a>
@@ -393,16 +403,25 @@ function pageSubject() {
   if (!s) return `<div class="empty">Subject not found. <a href="#/subjects">Back</a></div>`;
   const syl = syllabusProgress(s);
   const files = S.files.filter((f) => f.subject_id === s.id);
-  const tabs = [["assess", "TA · ERLA · PA"], ["syllabus", `Syllabus${syl !== null ? ` ${pct(syl)}%` : ""}`], ...(s.has_notes || classNotesFor(s.id).length || (S.user.is_admin && !s.owner_id) ? [["notes", `📘 Notes${classNotesFor(s.id).length ? ` (${classNotesFor(s.id).length})` : ""}`]] : []), ["files", `Files (${files.length})`], ["cols", "Customise"]];
+  const tabs = [["assess", "Assessments"], ["syllabus", `Syllabus${syl !== null ? ` ${pct(syl)}%` : ""}`], ...(s.has_notes || classNotesFor(s.id).length || (S.user.is_admin && !s.owner_id) ? [["notes", `📘 Notes${classNotesFor(s.id).length ? ` (${classNotesFor(s.id).length})` : ""}`]] : []), ["files", `Files (${files.length})`], ["cols", "Customise"]];
   if (!tabs.some(([t]) => t === subTab)) subTab = "assess";
   let body = "";
   if (subTab === "assess") body = `<div class="as-grid">${kindsFor(s.id).map((k) => asCard(s, k)).join("")}</div>`;
   else if (subTab === "syllabus") body = syllabusView(s);
   else if (subTab === "notes") body = notesBody(s);
   else if (subTab === "files") body = filesView(files, s.id);
-  else body = `<div class="card"><h3>Which assessments apply to ${esc(s.short)}?</h3>
-      <p class="muted small" style="margin-top:-6px">Untick ones your faculty isn't taking (e.g. IT2 may have no TA 5). Only affects your view.</p>
-      <form id="kindsF" class="kchips">${S.kinds.map((k) => `<label><input type="checkbox" name="k" value="${k}" ${kindsFor(s.id).includes(k) ? "checked" : ""}> ${KIND_LABEL[k]}</label>`).join("")}</form></div>`;
+  else {
+    const mineK = kindsFor(s.id), forAll = S.user.is_super || (s.owner_id && s.owner_id === S.user.id);
+    const ck = customKindsFor(s.id);
+    body = `<div class="card"><h3>Which assessments apply to ${esc(s.short)}?</h3>
+      <p class="muted small" style="margin-top:-6px">Untick ones your faculty isn't taking, and add your own if ${esc(s.short)} has different ones (like Internal / External). Ticks only affect your view.</p>
+      <form id="kindsF" class="kchips">${S.kinds.map((k) => `<label><input type="checkbox" name="k" value="${k}" ${mineK.includes(k) ? "checked" : ""}> ${KIND_LABEL[k]}</label>`).join("")}
+        ${ck.map((x) => `<span class="kc-custom"><label><input type="checkbox" name="c" value="${esc(x.k)}" ${mineK.includes(x.k) ? "checked" : ""}> ${esc(x.label)}${x.all && !s.owner_id ? ' <em class="kc-all">everyone</em>' : ""}</label>${!x.all || forAll ? `<button type="button" class="kc-del" data-ckdel="${esc(x.k)}" data-ckall="${x.all ? 1 : ""}" aria-label="Remove ${esc(x.label)}">✕</button>` : ""}</span>`).join("")}</form>
+      <form id="ckF" class="ck-add"><input class="in" name="label" maxlength="24" required placeholder="Add your own, e.g. Internal, External, Mid-term viva">
+        ${forAll && !s.owner_id ? `<label class="tcheck"><input type="checkbox" name="all" checked><span>For everyone</span></label>` : ""}<button class="btn primary">+ Add</button></form>
+      ${S.user.is_super && !s.owner_id ? `<div class="kc-admin"><button class="btn sm ghost" id="kDefault">Make my ticked TA/ERLA/PA the default for everyone</button><span class="muted small">Students who haven't customised ${esc(s.short)} will see exactly this set.</span></div>` : ""}
+    </div>`;
+  }
   const ex = examsFor(s.id).filter((e) => e.exam_date || e.slot);
   return `
   <div class="sd-head" style="--c:${s.color || "#6366f1"}">
@@ -419,7 +438,7 @@ function asCard(s, k) {
   const files = S.files.filter((f) => f.subject_id === s.id && f.kind === k);
   const chk = (f, label, icon, cls = "") => `<label class="chk ${cls}"><input type="checkbox" data-f="${f}" ${a[f] ? "checked" : ""}><span><em>${icon}</em>${label}</span></label>`;
   return `<div class="card as ${a.submitted ? "done" : sc > 0 ? "prog" : ""}" data-sid="${s.id}" data-kind="${k}">
-    <div class="hd"><b>${KIND_LABEL[k]}</b><div class="row"><span class="saving" data-saving></span>${a.submitted ? '<span class="pill green">Submitted</span>' : due ? dueLabel(due) : ""}</div></div>
+    <div class="hd"><b>${kindLabel(k, s.id)}</b><div class="row"><span class="saving" data-saving></span>${a.submitted ? '<span class="pill green">Submitted</span>' : due ? dueLabel(due) : ""}</div></div>
     ${bd ? `<div class="batch-note">📌 Batch: ${bd.due_date ? "due " + fmtDate(bd.due_date) : ""}${bd.note ? (bd.due_date ? " — " : "") + linkify(bd.note) : ""}</div>` : ""}
     <div class="checks">${chk("report", "Report", "📄")}${chk("ppt", "PPT", "📊")}${chk("viva", "Viva", "🎤")}${chk("submitted", "Done", "✅", "sub")}</div>
     <label class="f"><span>Topic / title</span><input class="in" data-f="topic" value="${esc(a.topic || "")}" placeholder="e.g. YouTube analytics model"></label>
@@ -526,20 +545,21 @@ function pageNotes() {
     <span class="tag">${esc(s.short)}</span><h4>${esc(s.name)}</h4><div class="meta">${[s.has_notes ? "📘 Study notes" : "", classNotesFor(s.id).length ? `📎 ${classNotesFor(s.id).length} file${classNotesFor(s.id).length > 1 ? "s" : ""}` : ""].filter(Boolean).join(" · ") || "Coming soon"}</div></a>`).join("")}</div>`;
 }
 
+const upKindOpts = (sid) => `<option value="">Not linked</option>` + (sid ? kindsFor(Number(sid)) : S.kinds).map((k) => `<option value="${esc(k)}">${esc(sid ? kindLabel(k, Number(sid)) : KIND_LABEL[k])}</option>`).join("");
 function filesView(files, sid = null) {
   const subs = visibleSubjects();
   return `<div class="card" style="margin-bottom:14px">
     <div class="drop" id="drop"><b>Drop files here</b> or tap to choose<div class="small">Reports, PPTs, PDFs, code zips — up to 100 MB each</div><input type="file" multiple hidden id="dropIn"></div>
     <div class="row wrap" style="margin-top:10px">
       ${sid ? `<input type="hidden" id="upSid" value="${sid}">` : `<select class="in" id="upSid" style="max-width:240px"><option value="">General (no subject)</option>${subs.map((s) => `<option value="${s.id}">${esc(s.short)}</option>`).join("")}</select>`}
-      <select class="in" id="upKind" style="max-width:180px"><option value="">Not linked</option>${S.kinds.map((k) => `<option value="${k}">${KIND_LABEL[k]}</option>`).join("")}</select>
+      <select class="in" id="upKind" style="max-width:180px">${upKindOpts(sid)}</select>
     </div>
     <div class="progress" id="upProg"></div>
   </div>
   <div class="card">${files.length ? `<div class="list">${files.map((f) => { const s = subjById(f.subject_id); return `<div class="li file-row">
       <span class="dot" style="--c:${s?.color || "#94a3b8"}"></span>
       <div style="flex:1;min-width:0"><a class="ellip" href="#" data-preview="${f.id}" style="font-weight:700;text-decoration:none;color:inherit;display:block">${fileIcon(f)} ${esc(f.name)}</a>
-        <div class="muted small">${sid ? "" : (s ? esc(s.short) : "General") + " · "}${f.kind ? KIND_LABEL[f.kind] + " · " : ""}${fmtSize(f.size)} · ${fmtDate(f.created_at, false)}</div></div>
+        <div class="muted small">${sid ? "" : (s ? esc(s.short) : "General") + " · "}${f.kind ? kindLabel(f.kind, f.subject_id) + " · " : ""}${fmtSize(f.size)} · ${fmtDate(f.created_at, false)}</div></div>
       <button class="btn sm ghost" data-preview="${f.id}" title="Preview">👁<span class="hide-sm"> Preview</span></button>
       <a class="btn sm ghost" href="/api/file/${f.id}?download=1" title="Download">⤓<span class="hide-sm"> Download</span></a>
       <button class="btn sm danger" data-delfile="${f.id}" title="Delete">✕</button></div>`; }).join("")}</div>`
@@ -571,7 +591,7 @@ function pageChecklist() {
     </div>
     <div class="card"><h3>📋 Pending in assessments</h3>
       ${pending.length ? `<div class="list">${pending.map(({ s, k, a, miss }) => `<a class="li" href="#/subject/${s.id}" style="text-decoration:none;color:inherit">
-        <span class="dot" style="--c:${s.color}"></span><div style="flex:1;min-width:0"><b>${esc(s.short)} · ${KIND_LABEL[k]}</b><div class="muted small">${miss.length ? "Still to do: " + miss.map((m) => m === "ppt" ? "PPT" : m[0].toUpperCase() + m.slice(1)).join(", ") : "Mark as done once submitted"}</div></div>${dueLabel(effDue(a))}</a>`).join("")}</div>`
+        <span class="dot" style="--c:${s.color}"></span><div style="flex:1;min-width:0"><b>${esc(s.short)} · ${kindLabel(k, s.id)}</b><div class="muted small">${miss.length ? "Still to do: " + miss.map((m) => m === "ppt" ? "PPT" : m[0].toUpperCase() + m.slice(1)).join(", ") : "Mark as done once submitted"}</div></div>${dueLabel(effDue(a))}</a>`).join("")}</div>`
         : `<div class="empty">Started assessments with something left will show here.</div>`}
     </div>
   </div>
@@ -1036,6 +1056,7 @@ function pageSettings() {
   </div>`;
 }
 
+const dlKindOpts = (sid) => { const s = subjById(sid); return [...S.kinds, ...(s?.custom_kinds || []).map((x) => x.k)].map((k) => `<option value="${esc(k)}">${esc(kindLabel(k, sid))}</option>`).join(""); };
 const canManage = (x) => S.user.is_super || (S.user.is_admin && !S.user.admin_scope) || (!!S.user.admin_scope && x?.target_section === S.user.admin_scope);
 let ADMINS = null, adminsLoading = false;
 async function loadAdmins() {
@@ -1077,14 +1098,14 @@ function pageAdmin() {
       <button class="btn primary">Post</button></form></div>
     <div class="card"><h3>📌 Deadline (TA / ERLA / PA)</h3><form id="dlF">
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-      <label class="f"><span>Subject</span><select class="in" name="subject_id">${subOpts()}</select></label>
-      <label class="f"><span>Assessment</span><select class="in" name="kind">${S.kinds.map((k) => `<option value="${k}">${KIND_LABEL[k]}</option>`).join("")}</select></label></div>
+      <label class="f"><span>Subject</span><select class="in" name="subject_id" id="dlSub">${subOpts()}</select></label>
+      <label class="f"><span>Assessment</span><select class="in" name="kind" id="dlKind">${dlKindOpts(subs[0]?.id)}</select></label></div>
       ${targetField()}
       <label class="f"><span>Due date</span><input class="in" type="date" name="due_date"></label>
       <label class="f"><span>Note</span><input class="in" name="note" placeholder="Topic / format / faculty note"></label>
       <label class="tcheck" style="padding:4px 0"><input type="checkbox" name="notify" checked><span>Ping their devices</span></label>
       <button class="btn primary">Save deadline</button> <span class="muted small">A section deadline overrides the all-sections one for that section.</span></form>
-      ${dls.length ? `<div class="list" style="margin-top:10px">${dls.map((d) => { const s = subjById(d.subject_id); return `<div class="li"><span class="dot" style="--c:${s?.color}"></span><div style="flex:1;min-width:0"><b>${esc(s?.short)} · ${KIND_LABEL[d.kind]}</b> ${secTag(d, true)}<div class="muted small">${d.due_date ? fmtDate(d.due_date) : "no date"}${d.note ? " — " + esc(d.note) : ""}</div></div><button class="btn sm ghost" data-edit-dl="${d.id}">Edit</button> <button class="btn sm danger" data-deldl="${d.id}">✕</button></div>`; }).join("")}</div>` : ""}
+      ${dls.length ? `<div class="list" style="margin-top:10px">${dls.map((d) => { const s = subjById(d.subject_id); return `<div class="li"><span class="dot" style="--c:${s?.color}"></span><div style="flex:1;min-width:0"><b>${esc(s?.short)} · ${kindLabel(d.kind, d.subject_id)}</b> ${secTag(d, true)}<div class="muted small">${d.due_date ? fmtDate(d.due_date) : "no date"}${d.note ? " — " + esc(d.note) : ""}</div></div><button class="btn sm ghost" data-edit-dl="${d.id}">Edit</button> <button class="btn sm danger" data-deldl="${d.id}">✕</button></div>`; }).join("")}</div>` : ""}
     </div>
   </div>
   <div class="card" style="margin-top:14px"><h3>◷ Unit assessments (UA-1 / UA-2 / UA-3)</h3>
@@ -1240,10 +1261,47 @@ function wirePage() {
 
   const kf = document.getElementById("kindsF");
   if (kf) kf.onchange = () => {
-    const ks = [...kf.querySelectorAll("input:checked")].map((i) => i.value);
-    if (!ks.length) return toast("Keep at least one", true);
-    savePrefs({ kinds: { ...(prefs().kinds || {}), [routeArg]: ks } });
+    const std = [...kf.querySelectorAll('input[name=k]:checked')].map((i) => i.value);
+    const hide = [...kf.querySelectorAll('input[name=c]:not(:checked)')].map((i) => i.value);
+    if (!kf.querySelectorAll("input:checked").length) { render(); return toast("Keep at least one", true); }
+    savePrefs({ kinds: { ...(prefs().kinds || {}), [routeArg]: std }, khide: { ...(prefs().khide || {}), [routeArg]: hide } });
   };
+  const sid0 = Number(routeArg), subj0 = route === "subject" ? subjById(sid0) : null;
+  const saveSubjKinds = async (custom, def) => {
+    const r = await api("PUT", `subject-kinds/${sid0}`, { custom_kinds: custom, default_kinds: def });
+    Object.assign(subj0, { custom_kinds: r.subject.custom_kinds, default_kinds: r.subject.default_kinds });
+  };
+  const ckF = document.getElementById("ckF");
+  if (ckF && subj0) ckF.onsubmit = async (e) => {
+    e.preventDefault();
+    const fd = Object.fromEntries(new FormData(ckF)), label = String(fd.label || "").trim().slice(0, 24), k = kindKey(label);
+    if (k.length < 2) return toast("Use letters or numbers", true);
+    if (kindsFor(sid0).includes(k) || S.kinds.some((x) => x.toLowerCase() === k.slice(1))) return toast(`${label} is already there`, true);
+    const unhide = { khide: { ...(prefs().khide || {}), [sid0]: ((prefs().khide || {})[sid0] || []).filter((x) => x !== k) } };
+    try {
+      if (fd.all || subj0.owner_id) await saveSubjKinds([...(subj0.custom_kinds || []), { k, label }], subj0.default_kinds ?? null);
+      else unhide.ckinds = { ...(prefs().ckinds || {}), [sid0]: [...myCKinds(sid0), { k, label }] };
+      await savePrefs(unhide); render(); toast(`Added ${label}${fd.all ? " for everyone" : ""}`);
+    } catch (err) { toast(err.message, true); }
+  };
+  on("[data-ckdel]", (b) => (b.onclick = async () => {
+    const k = b.dataset.ckdel, label = kindLabel(k, sid0);
+    if (!confirm(`Remove "${label}"${b.dataset.ckall ? " for everyone" : ""}? Ticks you saved for it stay in your data.`)) return;
+    try {
+      if (b.dataset.ckall) await saveSubjKinds((subj0.custom_kinds || []).filter((x) => x.k !== k), subj0.default_kinds ?? null);
+      else await savePrefs({ ckinds: { ...(prefs().ckinds || {}), [sid0]: myCKinds(sid0).filter((x) => x.k !== k) } });
+      render(); toast("Removed");
+    } catch (err) { toast(err.message, true); }
+  }));
+  const kDef = document.getElementById("kDefault");
+  if (kDef && subj0) kDef.onclick = async () => {
+    const std = stdKindsFor(sid0);
+    try { await saveSubjKinds(subj0.custom_kinds || [], std); render(); toast(`Default for ${subj0.short}: ${[...std.map((k) => KIND_LABEL[k]), ...(subj0.custom_kinds || []).map((x) => x.label)].join(", ") || "custom only"}`); } catch (err) { toast(err.message, true); }
+  };
+  const dlSub = document.getElementById("dlSub");
+  if (dlSub) dlSub.onchange = () => (document.getElementById("dlKind").innerHTML = dlKindOpts(Number(dlSub.value)));
+  const upSid = document.getElementById("upSid");
+  if (upSid && upSid.tagName === "SELECT") upSid.onchange = () => (document.getElementById("upKind").innerHTML = upKindOpts(upSid.value));
 
   // notes
   on("[data-toc]", (a) => (a.onclick = (e) => { e.preventDefault(); main.querySelectorAll(".md h3")[Number(a.dataset.toc)]?.scrollIntoView({ behavior: "smooth", block: "start" }); }));
@@ -1414,13 +1472,13 @@ function wirePage() {
   };
   on("[data-deldl]", (el) => (el.onclick = async () => {
     const d = S.deadlines.find((x) => x.id === Number(el.dataset.deldl)); if (!d) return;
-    if (!confirm(`Remove the ${subjById(d.subject_id)?.short} ${KIND_LABEL[d.kind]} deadline for ${secLabel(d.target_section, d.target_group)}?`)) return;
+    if (!confirm(`Remove the ${subjById(d.subject_id)?.short} ${kindLabel(d.kind, d.subject_id)} deadline for ${secLabel(d.target_section, d.target_group)}?`)) return;
     try { await api("PUT", "deadline", { id: d.id, subject_id: d.subject_id, kind: d.kind, target_section: d.target_section, target_group: d.target_group }); S.deadlines = S.deadlines.filter((x) => x.id !== d.id); render(); } catch (e) { toast(e.message, true); }
   }));
   on("[data-edit-dl]", (b) => (b.onclick = () => {
     const d = S.deadlines.find((x) => x.id === Number(b.dataset.editDl)); if (!d) return;
     const sid = d.subject_id, kind = d.kind;
-    formModal(`Edit deadline · ${subjById(sid)?.short} ${KIND_LABEL[kind]}`, [
+    formModal(`Edit deadline · ${subjById(sid)?.short} ${kindLabel(kind, sid)}`, [
       { html: targetField(tgtVal(d)) },
       { name: "due_date", label: "Due date", type: "date", value: dOnly(d?.due_date) },
       { name: "note", label: "Note", value: d?.note || "" },
@@ -1588,7 +1646,7 @@ async function openPreview(id, list) {
     const f = files[cur], body = bg.querySelector(".pv-body");
     const s = subjById(f.subject_id);
     bg.querySelector(".pv-name").textContent = `${fileIcon(f)} ${f.name}`;
-    bg.querySelector(".pv-meta").textContent = [s?.short, f.kind && KIND_LABEL[f.kind], f._ep && (f.unit_idx != null ? `Unit ${f.unit_idx + 1}` : "Class notes"), fmtSize(f.size)].filter(Boolean).join(" · ");
+    bg.querySelector(".pv-meta").textContent = [s?.short, f.kind && kindLabel(f.kind, f.subject_id), f._ep && (f.unit_idx != null ? `Unit ${f.unit_idx + 1}` : "Class notes"), fmtSize(f.size)].filter(Boolean).join(" · ");
     const c = bg.querySelector(".pv-count"); if (c) c.textContent = `${cur + 1} / ${files.length}`;
     bg.querySelector(".pv-dl").href = `/api/${ep(f)}/${f.id}?download=1`;
     bg.querySelector(".pv-open").href = `/api/${ep(f)}/${f.id}`;
@@ -1712,7 +1770,7 @@ function exportCsv() {
   const rows = [["Subject", "Code", "Assessment", "Topic", "Due", "Report", "PPT", "Viva", "Submitted", "Marks", "Max", "Notes"]];
   for (const s of visibleSubjects()) for (const k of kindsFor(s.id)) {
     const a = getA(s.id, k);
-    rows.push([s.name, s.code, KIND_LABEL[k], a.topic, effDue(a), a.report ? "Yes" : "", a.ppt ? "Yes" : "", a.viva ? "Yes" : "", a.submitted ? "Yes" : "", a.marks, a.max_marks, a.notes]);
+    rows.push([s.name, s.code, kindLabel(k, s.id), a.topic, effDue(a), a.report ? "Yes" : "", a.ppt ? "Yes" : "", a.viva ? "Yes" : "", a.submitted ? "Yes" : "", a.marks, a.max_marks, a.notes]);
   }
   download(`sem7-tracker-${S.user.roll_no}.csv`, "﻿" + rows.map((r) => r.map(cell).join(",")).join("\n"), "text/csv");
 }

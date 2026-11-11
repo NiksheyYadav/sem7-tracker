@@ -584,3 +584,14 @@ a.autolink:hover { background: color-mix(in srgb, var(--brand) 18%, transparent)
 @keyframes updIn{from{opacity:0;transform:translate(-50%,20px)}}
 @media (max-width:760px){.upd-bar{bottom:calc(74px + env(safe-area-inset-bottom))}}
 .upd-bar b{white-space:nowrap}
+/* custom assessment types */
+.kc-custom{display:inline-flex;align-items:center;gap:0;border-radius:999px}
+.kc-custom label{border-top-right-radius:0!important;border-bottom-right-radius:0!important;border-right:0!important}
+.kc-del{border:1.5px solid var(--line);border-left:0;background:transparent;color:var(--muted,#888);border-radius:0 999px 999px 0;padding:0 10px;align-self:stretch;cursor:pointer;font-size:12px}
+.kc-del:hover{color:#dc2626}
+.kc-all{font-style:normal;font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.04em;opacity:.6;margin-left:2px}
+.ck-add{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:14px;padding-top:12px;border-top:1px dashed var(--line)}
+.ck-add .in{flex:1;min-width:180px}
+.ck-add .tcheck{padding:0;white-space:nowrap}
+.kc-admin{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:12px}
+.kc-custom:has(input:checked) .kc-del{border-color:var(--brand)}
