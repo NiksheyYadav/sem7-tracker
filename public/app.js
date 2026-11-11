@@ -195,7 +195,7 @@ function renderAuth(mode = "login") {
 
 // ------------------------------------------------------------ shell
 function navItems() {
-  const nav = [["home", "Home", "⌂"], ["subjects", "Subjects", "▦"], ["calendar", "Calendar", "▤"], ["notes", "Notes", "✎"], ["checklist", "Checklist", "☑"], ["files", "Files", "⇪"]];
+  const nav = [["home", "Home", "⌂"], ["subjects", "Subjects", "▦"], ["calendar", "Calendar", "▤"], ["leaderboard", "Leaderboard", "🏆"], ["notes", "Notes", "✎"], ["checklist", "Checklist", "☑"], ["files", "Files", "⇪"]];
   if (prefs().showAssignments) nav.splice(5, 0, ["assignments", "Assignments", "✍"]);
   return nav;
 }
@@ -204,7 +204,7 @@ function shell(content) {
   const active = route === "subject" ? "subjects" : route;
   const initials = S.user.name.split(/\s+/).map((w) => w[0]).slice(0, 2).join("").toUpperCase();
   const badge = badgeCount();
-  const bottom = [["home", "Home", "⌂"], ["subjects", "Subjects", "▦"], ["calendar", "Calendar", "▤"], ["checklist", "Checklist", "☑"], ["files", "Files", "⇪"]];
+  const bottom = [["home", "Home", "⌂"], ["subjects", "Subjects", "▦"], ["calendar", "Calendar", "▤"], ["leaderboard", "Ranks", "🏆"], ["checklist", "Checklist", "☑"]];
   return `
   <header class="top"><div class="top-in">
     <a class="logo" href="#/home"><i>✓</i><span class="logo-t">Sem 7 Tracker</span></a>
@@ -214,6 +214,8 @@ function shell(content) {
     <div class="menu" id="more">
       <button class="btn ghost sm" id="moreBtn" aria-haspopup="true">More ▾</button>
       <div class="menu-pop" role="menu">
+        <a href="#/leaderboard">🏆 Leaderboard</a>
+        <a href="#/files">⇪ My files</a>
         <a href="#/notes">✎ Study notes</a>
         <a href="#/assignments">✍ Assignments${prefs().showAssignments ? "" : ' <span class="pill" style="margin-left:auto">optional</span>'}</a>
         <a href="#/exams">◷ Unit assessments</a>
@@ -495,6 +497,121 @@ function pageAssignments() {
   <div class="card">${open.length ? `<div class="list">${open.map(row).join("")}</div>` : `<div class="empty">No open assignments.</div>`}
     ${done.length ? `<details style="margin-top:10px" ${done.length < 6 ? "open" : ""}><summary class="muted small" style="cursor:pointer">Completed (${done.length})</summary><div class="list">${done.map(row).join("")}</div>
       <button class="btn sm danger" id="clearDone" style="margin-top:8px">🗑 Delete all completed</button></details>` : ""}</div>`;
+}
+
+// ---- leaderboard
+let LB = null, lbLoading = false, lbConfettiDone = false;
+const BADGES = {
+  fire: ["🔥", "Active this week"], finisher: ["✅", "5+ assessments submitted"], reports: ["📄", "5+ reports done"],
+  viva: ["🎤", "5+ vivas done"], syllabus: ["📚", "75%+ syllabus covered"],
+};
+async function loadLB() {
+  if (lbLoading) return; lbLoading = true;
+  try { LB = await api("GET", "leaderboard"); LB._at = Date.now(); } catch (e) { toast(e.message, true); }
+  lbLoading = false;
+  if (route === "leaderboard") render();
+}
+function lbAvatar(x, size) {
+  const t = /^\d+$/.test(x.label) ? x.label.slice(-3) : x.label.split(/\s+/).map((w) => w[0]).slice(0, 2).join("").toUpperCase();
+  return `<div class="lb-av" style="--s:${size}px"><span>${esc(t)}</span></div>`;
+}
+function pageLeaderboard() {
+  if (!LB || Date.now() - LB._at > 30000) loadLB();
+  const show = prefs().lbShow || "roll";
+  const head = `<div class="lb-top">
+      <div><div class="lb-kicker">Sem VII · B.Tech CSE (DS)</div><h1 class="lb-title" data-text="LEADERBOARD">LEADERBOARD</h1>
+        <p class="lb-sub">Tick your reports, PPTs, vivas and syllabus topics. Climb the board.</p></div>
+      <div class="lb-switch" role="group" aria-label="Show me on the leaderboard as">
+        <span>Show me as</span>
+        <button data-lbshow="roll" class="${show === "roll" ? "on" : ""}">Roll no.</button><button data-lbshow="name" class="${show === "name" ? "on" : ""}">Name</button>
+      </div></div>`;
+  if (!LB) return `<div class="lb">${lbBg()}${head}<div class="lb-loading"><div class="lb-spin"></div>Loading the rankings…</div></div>`;
+  const L = LB.list, max = Math.max(1, ...L.map((x) => x.score));
+  const me = L.find((x) => x.me);
+  const ahead = me ? L.filter((x) => x.score > me.score).slice(-1)[0] : null;
+  const pctile = me ? Math.max(1, Math.round((L.filter((x) => x.score > me.score).length + 1) / L.length * 100)) : 0;
+  const scored = L.filter((x) => x.score > 0);
+  const top = [scored[1], scored[0], scored[2]];
+  const pod = top.map((x, i) => {
+    if (!x) return `<div class="pod empty"></div>`;
+    const place = [2, 1, 3][i];
+    return `<div class="pod p${place} ${x.me ? "me" : ""}" style="--d:${[0.25, 0, 0.45][i]}s" data-tilt>
+      ${place === 1 ? `<svg class="crown" viewBox="0 0 64 44"><path d="M4 40 L8 10 L22 24 L32 4 L42 24 L56 10 L60 40 Z" fill="url(#cg)" stroke="#7a4b00" stroke-width="2" stroke-linejoin="round"/><circle cx="32" cy="4" r="4" fill="#fff6c9"/><circle cx="8" cy="10" r="3.4" fill="#fff6c9"/><circle cx="56" cy="10" r="3.4" fill="#fff6c9"/><defs><linearGradient id="cg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff1a8"/><stop offset=".5" stop-color="#ffc83d"/><stop offset="1" stop-color="#e08a00"/></linearGradient></defs></svg>` : ""}
+      <div class="pod-ring">${lbAvatar(x, place === 1 ? 92 : 74)}</div>
+      <div class="pod-name">${esc(x.label)}${x.me ? ' <em>you</em>' : ""}</div>
+      <div class="pod-score"><b data-count="${x.score}">0</b> pts</div>
+      <div class="pod-badges">${x.badges.map((b) => `<span title="${BADGES[b][1]}">${BADGES[b][0]}</span>`).join("")}</div>
+      <div class="pillar"><span>${place}</span></div>
+    </div>`;
+  }).join("");
+  const rest = L.filter((x) => !top.includes(x));
+  const rows = rest.map((x, i) => `<div class="lb-row ${x.me ? "me" : ""} ${x.score ? "" : "zero"}" style="--d:${Math.min(i, 20) * 0.05 + 0.5}s">
+      <div class="rk">${x.score ? "#" + x.rank : "–"}</div>${lbAvatar(x, 40)}
+      <div class="who"><b>${esc(x.label)}${x.me ? ' <em>you</em>' : ""}</b>
+        <div class="bar"><i style="--w:${(x.score / max) * 100}%"></i></div></div>
+      <div class="bd">${x.badges.map((b) => `<span title="${BADGES[b][1]}">${BADGES[b][0]}</span>`).join("")}</div>
+      <div class="pts"><b data-count="${x.score}">0</b><small>pts</small></div></div>`).join("");
+  return `<div class="lb">${lbBg()}${head}
+    ${scored.length ? `<div class="podium">${pod}</div>` : `<div class="lb-empty"><div class="trophy">🏆</div><h2>The race hasn't started yet</h2><p>Open any subject, tick a report, PPT or viva, or check off a syllabus topic. The first points take the crown.</p><a class="lb-cta" href="#/subjects">Start scoring →</a></div>`}
+    ${me && me.score === 0 && scored.length ? `<div class="lb-me"><div class="big"><small>Your rank</small><b>–</b><span>not on the board</span></div>
+      <div class="mid"><div class="line1">Score your first points to enter the board. <b>${(scored[scored.length - 1]?.score || 0) + 1}</b> pts gets you past the last place.</div><div class="line2">One report + PPT + viva = 30 pts. Submitting = 20 more.</div></div></div>` : ""}
+    ${me && me.score > 0 ? `<div class="lb-me">
+      <div class="big"><small>Your rank</small><b>#${me.rank}</b><span>of ${L.length}</span></div>
+      <div class="mid"><div class="line1">${me.rank === 1 ? "👑 You're on top. Defend the crown!" : `<b>${ahead.score - me.score + 1}</b> pts to overtake <b>#${ahead.rank}</b>`}</div>
+        <div class="bar"><i style="--w:${(me.score / max) * 100}%"></i></div>
+        <div class="line2">Top ${pctile}% of the batch · ${me.submitted} submitted · ${me.reports + me.ppts + me.vivas} report/PPT/viva ticks · ${me.topics} topics</div></div>
+      <div class="pts"><b data-count="${me.score}">0</b><small>points</small></div></div>` : ""}
+    <div class="lb-list">${rows || ""}</div>
+    <div class="lb-rules">
+      <b>How points work</b>
+      <span>📄 Report <i>+10</i></span><span>📊 PPT <i>+10</i></span><span>🎤 Viva <i>+10</i></span><span>✅ Submitted <i>+20</i></span><span>📚 Syllabus topic <i>+5</i></span>
+      <div class="lb-legend">${Object.values(BADGES).map(([e, t]) => `<span>${e} ${t}</span>`).join("")}</div>
+      <div class="lb-fine">Only your name or roll number and your points are shown. Marks are never shown. Custom subjects don't count.</div>
+    </div>
+  </div>`;
+}
+function lbBg() {
+  return `<div class="lb-bg" aria-hidden="true"><i class="a1"></i><i class="a2"></i><i class="a3"></i><div class="stars"></div><div class="floor"></div></div><canvas class="lb-confetti"></canvas>`;
+}
+function lbEffects() {
+  const root = document.querySelector(".lb");
+  if (!root || !LB) return;
+  const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  root.querySelectorAll("[data-count]").forEach((el) => {
+    const to = Number(el.dataset.count);
+    if (still || !to) { el.textContent = to; return; }
+    const t0 = performance.now(), dur = 1400;
+    const step = (t) => { const k = Math.min(1, (t - t0) / dur); el.textContent = Math.round(to * (1 - Math.pow(1 - k, 3))); if (k < 1) requestAnimationFrame(step); };
+    requestAnimationFrame(step);
+  });
+  root.querySelectorAll("[data-tilt]").forEach((card) => {
+    card.onmousemove = (e) => { const r = card.getBoundingClientRect(); const x = (e.clientX - r.left) / r.width - 0.5, y = (e.clientY - r.top) / r.height - 0.5; card.style.transform = `perspective(700px) rotateY(${x * 14}deg) rotateX(${-y * 10}deg) translateY(-4px)`; };
+    card.onmouseleave = () => (card.style.transform = "");
+  });
+  const fire = () => confetti(root.querySelector(".lb-confetti"));
+  root.querySelector(".pod.p1")?.addEventListener("click", fire);
+  if (!still && !lbConfettiDone && LB.list.some((x) => x.score > 0)) { lbConfettiDone = true; setTimeout(fire, 700); }
+}
+function confetti(cv) {
+  if (!cv) return;
+  const ctx = cv.getContext("2d"), dpr = devicePixelRatio || 1;
+  const W = cv.clientWidth, H = cv.clientHeight; cv.width = W * dpr; cv.height = H * dpr; ctx.scale(dpr, dpr);
+  const cols = ["#ffd166", "#ff6b9d", "#7cf3ff", "#a78bfa", "#5eead4", "#ffffff", "#ff9f43"];
+  const ps = Array.from({ length: 170 }, () => ({ x: W / 2 + (Math.random() - 0.5) * 120, y: H * 0.28, vx: (Math.random() - 0.5) * 13, vy: -Math.random() * 13 - 4,
+    s: 5 + Math.random() * 7, r: Math.random() * 6, vr: (Math.random() - 0.5) * 0.4, c: cols[(Math.random() * cols.length) | 0], shape: Math.random() < 0.35 }));
+  const t0 = performance.now();
+  const tick = (t) => {
+    ctx.clearRect(0, 0, W, H);
+    const alive = t - t0 < 3600;
+    for (const p of ps) {
+      p.vy += 0.32; p.vx *= 0.99; p.x += p.vx; p.y += p.vy; p.r += p.vr;
+      ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.r); ctx.fillStyle = p.c; ctx.globalAlpha = Math.max(0, 1 - (t - t0) / 3600);
+      if (p.shape) { ctx.beginPath(); ctx.arc(0, 0, p.s / 2.4, 0, 7); ctx.fill(); } else ctx.fillRect(-p.s / 2, -p.s / 4, p.s, p.s / 2);
+      ctx.restore();
+    }
+    if (alive) requestAnimationFrame(tick); else ctx.clearRect(0, 0, W, H);
+  };
+  requestAnimationFrame(tick);
 }
 
 // ---- calendar
@@ -809,11 +926,12 @@ function queueSave(sid, kind) {
 function render() {
   if (!S) return renderAuth();
   const pages = { home: pageHome, subjects: pageSubjects, subject: pageSubject, checklist: pageChecklist, files: pageFiles, assignments: pageAssignments,
-    exams: pageExams, settings: pageSettings, admin: pageAdmin, calendar: pageCalendar, notifications: pageNotifications, updates: pageUpdates, notes: pageNotes };
+    exams: pageExams, settings: pageSettings, admin: pageAdmin, calendar: pageCalendar, notifications: pageNotifications, updates: pageUpdates, notes: pageNotes, leaderboard: pageLeaderboard };
   const y = window.scrollY;
   $app.innerHTML = shell((pages[route] || pageHome)());
   wireShell();
   wirePage();
+  if (route === "leaderboard") lbEffects();
   window.scrollTo(0, y);
 }
 
@@ -934,6 +1052,12 @@ function wirePage() {
       render(); toast("Event added");
     } catch (err) { toast(err.message, true); }
   };
+
+  // leaderboard display choice
+  on("[data-lbshow]", (b) => (b.onclick = async () => {
+    await savePrefs({ lbShow: b.dataset.lbshow });
+    LB = null; lbConfettiDone = true; render(); toast(b.dataset.lbshow === "name" ? "You'll appear by name" : "You'll appear by roll number");
+  }));
 
   // notifications
   const pOn = document.getElementById("pushOn");

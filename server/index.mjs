@@ -467,6 +467,38 @@ const routes = {
     return json({ ok: true });
   },
 
+  // ---- leaderboard (points only from shared subjects; marks are never exposed)
+  "GET leaderboard": async ({ req }) => {
+    const u = await needUser(req);
+    const [rows, tot] = await Promise.all([
+      q(`with a as (
+           select x.user_id, sum(x.report::int) r, sum(x.ppt::int) p, sum(x.viva::int) v, sum(x.submitted::int) s, max(x.updated_at) last
+           from assessments x join subjects sj on sj.id = x.subject_id and sj.owner_id is null group by x.user_id),
+         t as (
+           select tp.user_id, count(*) n from topic_progress tp join subjects sj on sj.id = tp.subject_id and sj.owner_id is null
+           where tp.done group by tp.user_id)
+         select u.id, u.roll_no, u.name, coalesce(u.prefs->>'lbShow', 'roll') as show,
+           coalesce(a.r,0)::int r, coalesce(a.p,0)::int p, coalesce(a.v,0)::int v, coalesce(a.s,0)::int s, coalesce(t.n,0)::int topics, a.last
+         from users u left join a on a.user_id = u.id left join t on t.user_id = u.id`),
+      q(`select coalesce(sum(jsonb_array_length(un->'topics')),0)::int n from subjects sj, jsonb_array_elements(sj.units) un where sj.owner_id is null and sj.kind <> 'elective'`),
+    ]);
+    const weekAgo = Date.now() - 7 * 86400000;
+    const list = rows.map((x) => {
+      const score = (x.r + x.p + x.v) * 10 + x.s * 20 + x.topics * 5;
+      const badges = [];
+      if (score > 0 && x.last && new Date(x.last).getTime() > weekAgo) badges.push("fire");
+      if (x.s >= 5) badges.push("finisher");
+      if (x.r >= 5) badges.push("reports");
+      if (x.v >= 5) badges.push("viva");
+      if (tot[0].n && x.topics / tot[0].n >= 0.75) badges.push("syllabus");
+      return { me: x.id === u.id, label: x.show === "name" ? x.name : x.roll_no, show: x.show, score,
+        reports: x.r, ppts: x.p, vivas: x.v, submitted: x.s, topics: x.topics, badges };
+    }).sort((a, b) => b.score - a.score || b.submitted - a.submitted || a.label.localeCompare(b.label));
+    let rank = 0, prev = null;
+    list.forEach((x, i) => { if (x.score !== prev) { rank = i + 1; prev = x.score; } x.rank = rank; });
+    return json({ list, totalTopics: tot[0].n, updated: new Date().toISOString() });
+  },
+
   // ---- study notes
   "GET notes": async ({ req }, id) => {
     const u = await needUser(req);
