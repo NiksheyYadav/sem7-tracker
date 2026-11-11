@@ -512,3 +512,9 @@ img, table { max-width: 100%; }
   .pv-meta { flex: 1; }
   .pv-hint { white-space: normal; width: 90%; text-align: center; }
 }
+/* never let long words / URLs widen the page */
+.main { min-width: 0; }
+.card, .li, .md, .batch-note, .tcheck span, .ann-body, .notice { overflow-wrap: anywhere; word-break: normal; }
+.card.notice { cursor: pointer; }
+a.autolink { display: inline-flex; align-items: center; gap: 3px; max-width: 100%; padding: 1px 8px; border-radius: 99px; background: color-mix(in srgb, var(--brand) 10%, transparent); color: var(--brand); font-weight: 700; text-decoration: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
+a.autolink:hover { background: color-mix(in srgb, var(--brand) 18%, transparent); }

@@ -61,13 +61,21 @@ function download(name, text, type = "application/json") {
   a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
+// bare URLs → short, tappable links (input must already be HTML-escaped)
+function shortUrl(u) {
+  try { const x = new URL(u.replace(/&amp;/g, "&")); const path = (x.pathname + x.search).replace(/\/$/, ""); return x.host.replace(/^www\./, "") + (path.length > 22 ? path.slice(0, 18) + "…" : path); } catch { return u.slice(0, 40) + "…"; }
+}
+const autolink = (escaped) => escaped.replace(/(^|[\s(])(https?:\/\/[^\s<]+[^\s<.,;:!?)])/g, (m, pre, u) => `${pre}<a class="autolink" href="${u}" target="_blank" rel="noopener">🔗 ${esc(shortUrl(u))}</a>`);
+const linkify = (text) => autolink(esc(text));
+
 // tiny, safe markdown renderer (headings, lists, tables, quotes, bold/italic/code, hr)
 function md(src) {
   const inline = (t) => esc(t)
     .replace(/`([^`]+)`/g, "<code>$1</code>")
     .replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
     .replace(/(^|[\s(])\*([^*\n]+)\*(?=[\s).,;:!?]|$)/g, "$1<i>$2</i>")
-    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
+    .replace(/(^|[\s(])(https?:\/\/[^\s<]+[^\s<.,;:!?)])/g, (m, pre, u) => `${pre}<a class="autolink" href="${u}" target="_blank" rel="noopener">🔗 ${esc(shortUrl(u))}</a>`);
   const lines = String(src || "").replace(/\r/g, "").split("\n");
   let out = "", i = 0;
   while (i < lines.length) {
@@ -289,7 +297,7 @@ function pageHome() {
       <div><b>${pct(syl)}%</b><span>syllabus covered</span></div>
     </div>
   </section>
-  ${latest && unreadUpdates().some((u) => u.id === latest.id) ? `<a class="card notice" href="#/notifications"><b>📣 ${esc(latest.title)}</b><span class="muted small">${esc((latest.body || "").split("\n")[0])}</span></a>` : ""}
+  ${latest && unreadUpdates().some((u) => u.id === latest.id) ? `<div class="card notice" data-go="#/notifications"><b>📣 ${esc(latest.title)}</b><span class="muted small">${linkify((latest.body || "").split("\n").slice(0, 2).join(" "))}</span><span class="small" style="color:var(--brand);font-weight:700">Open notifications →</span></div>` : ""}
   <div class="grid g2">
     <div class="card"><h3>⏰ Coming up <a href="#/calendar" class="small" style="margin-left:auto;font-weight:600">calendar</a></h3>
       ${items.length ? `<div class="list">${items.map((x) => itemRow(x)).join("")}</div>` : `<div class="empty">Nothing dated yet. Add due dates in a subject's TA / ERLA / PA cards, or add events in the calendar.</div>`}
@@ -360,7 +368,7 @@ function asCard(s, k) {
   const chk = (f, label, icon, cls = "") => `<label class="chk ${cls}"><input type="checkbox" data-f="${f}" ${a[f] ? "checked" : ""}><span><em>${icon}</em>${label}</span></label>`;
   return `<div class="card as ${a.submitted ? "done" : sc > 0 ? "prog" : ""}" data-sid="${s.id}" data-kind="${k}">
     <div class="hd"><b>${KIND_LABEL[k]}</b><div class="row"><span class="saving" data-saving></span>${a.submitted ? '<span class="pill green">Submitted</span>' : due ? dueLabel(due) : ""}</div></div>
-    ${bd ? `<div class="batch-note">📌 Batch: ${bd.due_date ? "due " + fmtDate(bd.due_date) : ""}${bd.note ? (bd.due_date ? " — " : "") + esc(bd.note) : ""}</div>` : ""}
+    ${bd ? `<div class="batch-note">📌 Batch: ${bd.due_date ? "due " + fmtDate(bd.due_date) : ""}${bd.note ? (bd.due_date ? " — " : "") + linkify(bd.note) : ""}</div>` : ""}
     <div class="checks">${chk("report", "Report", "📄")}${chk("ppt", "PPT", "📊")}${chk("viva", "Viva", "🎤")}${chk("submitted", "Done", "✅", "sub")}</div>
     <label class="f"><span>Topic / title</span><input class="in" data-f="topic" value="${esc(a.topic || "")}" placeholder="e.g. YouTube analytics model"></label>
     <div class="two">
@@ -696,7 +704,7 @@ function pageCalendar() {
       <div class="card"><h3>${fmtDate(calSel)}${calSel === today ? ' <span class="pill brand">Today</span>' : ""}</h3>
         ${sel.length ? `<div class="list">${sel.map((x) => `<div class="li">
             <span class="dot" style="--c:${x.color || x.s?.color || "#64748b"}"></span>
-            <div style="flex:1;min-width:0"><div style="font-weight:700">${esc(x.title)}</div><div class="muted small">${TYPE_META[x.type][0]}${x.time ? " · " + esc(x.time) : ""}${x.note ? " · " + esc(x.note) : ""}</div></div>
+            <div style="flex:1;min-width:0"><div style="font-weight:700">${esc(x.title)}</div><div class="muted small">${TYPE_META[x.type][0]}${x.time ? " · " + esc(x.time) : ""}${x.note ? " · " + linkify(x.note) : ""}</div></div>
             ${x.ev && (x.ev.user_id || S.user.is_admin) ? `<button class="btn sm ghost" data-edit-ev="${x.ev.id}">Edit</button>` : x.href ? `<a class="btn sm ghost" href="${x.href}">Open</a>` : ""}
           </div>`).join("")}</div>` : `<div class="empty" style="padding:12px">Nothing on this day.</div>`}
         <form id="evF" style="margin-top:12px;border-top:1px dashed var(--line);padding-top:12px">
@@ -1463,6 +1471,7 @@ function parseRoute() {
   if (prev !== route + routeArg) notesCache._edit = null;
 }
 window.addEventListener("hashchange", () => { parseRoute(); if (S) { render(); window.scrollTo(0, 0); } });
+document.addEventListener("click", (e) => { const g = e.target.closest("[data-go]"); if (g && !e.target.closest("a")) location.hash = g.dataset.go; }, false);
 document.addEventListener("click", (e) => { const a = e.target.closest("[data-goto-syl]"); if (a) nextSubTab = "syllabus"; const c = e.target.closest("[data-cal-date]"); if (c) { calSel = c.dataset.calDate; calMonth = calSel.slice(0, 7); } }, true);
 document.addEventListener("visibilitychange", async () => {   // refresh when coming back to the tab
   if (document.visibilityState !== "visible" || !S || document.querySelector(".modal-bg") || document.activeElement?.matches("input,textarea")) return;
