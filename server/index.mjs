@@ -173,8 +173,8 @@ const numOrNull = (v) => (v === "" || v == null || isNaN(Number(v)) ? null : Num
 const normRoll = (r) => String(r || "").trim().toUpperCase();
 
 async function subjectVisibleTo(user, subjectId) {
-  const r = await q("select id from subjects where id=$1 and (owner_id is null or owner_id=$2)", [subjectId, user.id]);
-  if (!r.length) bad("Unknown subject");
+  const r = await q("select id, owner_id, target_section, target_group from subjects where id=$1 and (owner_id is null or owner_id=$2)", [subjectId, user.id]);
+  if (!r.length || (!r[0].owner_id && !user.is_admin && !visibleTo(user, r[0]))) bad("Unknown subject");
 }
 
 // tiny per-isolate login throttle
@@ -279,7 +279,7 @@ async function runReminders(scheduledAt) {
   const users = await q("select u.id, u.prefs, u.section, u.grp from users u where exists (select 1 from push_subs p where p.user_id=u.id)");
   if (!users.length) return { users: 0, sent: 0 };
   const [subjects, exams, deadlines, events] = await Promise.all([
-    q("select id, short, kind, owner_id, custom_kinds from subjects"),
+    q("select id, short, kind, owner_id, custom_kinds, target_section, target_group from subjects"),
     q("select * from exams where exam_date = any($1::date[])", [dates]),
     q("select * from batch_deadlines where due_date = any($1::date[])", [dates]),
     q("select * from events where event_date = any($1::date[])", [dates]),
@@ -288,7 +288,7 @@ async function runReminders(scheduledAt) {
   let sent = 0;
   for (const u of users) {
     const p = u.prefs || {}, hidden = new Set(p.hidden || []), el = new Set(p.electives || []);
-    const visible = (sid) => { const s = sById[sid]; if (!s) return false; if (s.owner_id) return s.owner_id === u.id; return s.kind === "elective" ? el.has(s.id) : !hidden.has(s.id); };
+    const visible = (sid) => { const s = sById[sid]; if (!s) return false; if (s.owner_id) return s.owner_id === u.id; if (!visibleTo(u, s)) return false; return s.kind === "elective" ? el.has(s.id) : !hidden.has(s.id); };
     const [mine, asg] = await Promise.all([
       q("select subject_id, kind, due_date, submitted, topic from assessments where user_id=$1", [u.id]),
       q("select title, due_date from assignments where user_id=$1 and not done and due_date = any($2::date[])", [u.id, dates]),
@@ -406,8 +406,11 @@ const routes = {
   "GET bootstrap": async ({ req }) => {
     const u = await needUser(req);
     const [subjects, deadlines, assessments, assignments, todos, topics, files, batch, exams, events, sharedNotes, updates, subs] = await Promise.all([
-      q(`select id, code, name, short, credits, kind, is_default, units, color, owner_id, sort, custom_kinds, default_kinds, (notes_md is not null) as has_db_notes
-         from subjects where owner_id is null or owner_id=$1 order by sort, id`, [u.id]),
+      u.is_admin
+        ? q(`select id, code, name, short, credits, kind, is_default, units, color, owner_id, sort, custom_kinds, default_kinds, target_section, target_group, created_by, (notes_md is not null) as has_db_notes
+            from subjects where owner_id is null or owner_id=$1 order by sort, id`, [u.id])
+        : forUser(`select id, code, name, short, credits, kind, is_default, units, color, owner_id, sort, custom_kinds, default_kinds, target_section, target_group, created_by, (notes_md is not null) as has_db_notes
+            from subjects x where x.owner_id=$1 or (x.owner_id is null and ${VIS("x")}) order by sort, id`, u, [u.id]),
       u.is_admin ? q("select * from batch_deadlines") : forUser(`select * from batch_deadlines d where ${VIS("d")}`, u),
       q("select * from assessments where user_id=$1", [u.id]),
       q("select * from assignments where user_id=$1 order by done, due_date nulls last, id", [u.id]),
@@ -798,19 +801,48 @@ const routes = {
   "PUT subject": async ({ req, body: b }, id) => {
     const u = await needUser(req);
     const s = (await q("select * from subjects where id=$1", [id]))[0];
-    if (!s || (s.owner_id ? s.owner_id !== u.id : !u.is_super)) throw new HttpError(403, "You can't edit this subject");
+    if (!s || (s.owner_id ? s.owner_id !== u.id : !(u.is_admin && canManage(u, s)))) throw new HttpError(403, "You can't edit this subject");
     const name = str(b.name, 100)?.trim();
     if (!name) bad("Enter a subject name");
-    const rows = await q(`update subjects set name=$1, short=$2, code=$3, credits=$4, color=$5 where id=$6
-      returning id, code, name, short, credits, kind, is_default, units, color, owner_id, sort, custom_kinds, default_kinds`,
-      [name, str(b.short, 14)?.trim() || name.slice(0, 12), str(b.code, 20)?.trim() || null, numOrNull(b.credits), /^#[0-9a-f]{6}$/i.test(b.color || "") ? b.color : s.color, id]);
+    const t = s.owner_id ? {} : cleanTarget(b, u);
+    const kind = s.owner_id ? s.kind : SUBJ_KINDS.includes(b.kind) ? b.kind : s.kind;
+    const rows = await q(`update subjects set name=$1, short=$2, code=$3, credits=$4, color=$5, kind=$7, target_section=$8, target_group=$9 where id=$6
+      returning id, code, name, short, credits, kind, is_default, units, color, owner_id, sort, custom_kinds, default_kinds, target_section, target_group, created_by`,
+      [name, str(b.short, 14)?.trim() || name.slice(0, 12), str(b.code, 20)?.trim() || null, numOrNull(b.credits), /^#[0-9a-f]{6}$/i.test(b.color || "") ? b.color : s.color, id, kind, t.s || null, t.g || null]);
     return json({ subject: rows[0] });
+  },
+  // a subject for everyone / a section, added by an admin
+  "POST admin/subject": async ({ req, body: b }) => {
+    const u = await needAdmin(req);
+    const name = str(b.name, 100)?.trim();
+    if (!name) bad("Enter a subject name");
+    const t = cleanTarget(b, u);
+    const kind = SUBJ_KINDS.includes(b.kind) ? b.kind : "theory";
+    const custom = cleanKindList(b.custom_kinds);
+    const def = b.standard === false ? [] : null;
+    if (def && !custom.length) bad("Add at least one assessment type (e.g. Project)");
+    if ((await q("select 1 from subjects where owner_id is null and lower(short)=lower($1) and coalesce(target_section,'')=$2", [str(b.short, 14)?.trim() || name.slice(0, 12), t.s || ""])).length) bad("A subject with that short name already exists for them");
+    const rows = await q(`insert into subjects (code, name, short, credits, kind, is_default, color, owner_id, sort, custom_kinds, default_kinds, target_section, target_group, created_by)
+      values ($1,$2,$3,$4,$5,true,$6,null,40,$7,$8,$9,$10,$11) returning id, code, name, short, credits, kind, is_default, units, color, owner_id, sort, custom_kinds, default_kinds, target_section, target_group, created_by`,
+      [str(b.code, 20)?.trim() || null, name, str(b.short, 14)?.trim() || name.slice(0, 12), numOrNull(b.credits), kind,
+       /^#[0-9a-f]{6}$/i.test(b.color || "") ? b.color : "#0ea5e9", JSON.stringify(custom), def ? JSON.stringify(def) : null, t.s || null, t.g || null, u.roll_no]);
+    return json({ subject: rows[0] });
+  },
+  "DELETE admin/subject": async ({ req }, id) => {
+    const u = await needAdmin(req);
+    const s = (await q("select * from subjects where id=$1 and owner_id is null", [id]))[0];
+    if (!s) return json({ ok: true });
+    if (!canManage(u, s)) throw new HttpError(403, "You can only delete your section's subjects");
+    const used = (await q("select count(distinct user_id)::int n from assessments where subject_id=$1 and (submitted or report or ppt or viva)", [id]))[0].n;
+    if (used && !u.is_super) bad(`${used} student${used > 1 ? "s have" : " has"} progress on this subject — ask the main admin to delete it`);
+    await q("delete from subjects where id=$1", [id]);
+    return json({ ok: true });
   },
   // which assessments a subject has for everyone (main admin for shared subjects, owner for personal ones)
   "PUT subject-kinds": async ({ req, body: b }, id) => {
     const u = await needUser(req);
     const s = (await q("select * from subjects where id=$1", [id]))[0];
-    if (!s || (s.owner_id ? s.owner_id !== u.id : !u.is_super)) throw new HttpError(403, "Only the main admin can change this subject's assessments");
+    if (!s || (s.owner_id ? s.owner_id !== u.id : !(u.is_admin && canManage(u, s)))) throw new HttpError(403, "You can't change this subject's assessments");
     const custom = cleanKindList(b.custom_kinds);
     const def = Array.isArray(b.default_kinds) ? KINDS.filter((k) => b.default_kinds.includes(k)) : null;
     if (def && !def.length && !custom.length) bad("Keep at least one assessment");
@@ -956,6 +988,7 @@ const routes = {
     return json({ ok: true });
   },
 };
+const SUBJ_KINDS = ["theory", "practical", "project", "seminar", "training", "elective", "minor"];
 const FB_CATS = ["bug", "idea", "design", "content", "praise", "other"];
 const FB_STATUS = ["new", "seen", "planned", "done", "wontfix"];
 

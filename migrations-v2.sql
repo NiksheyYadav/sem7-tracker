@@ -29,3 +29,5 @@ create table if not exists shared_notes (id bigserial primary key, subject_id in
 create index if not exists shared_notes_subject on shared_notes (subject_id);
 -- v2.4b: custom assessment types per subject
 alter table subjects add column if not exists custom_kinds jsonb not null default '[]'::jsonb, add column if not exists default_kinds jsonb;
+-- v2.5: section-aware shared subjects
+alter table subjects add column if not exists target_section text, add column if not exists target_group text, add column if not exists created_by text;

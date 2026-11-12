@@ -152,6 +152,7 @@ function isVisible(s) {
   if (!s) return false;
   const p = prefs();
   if (s.owner_id) return true;
+  if (!forMe(s)) return false; // a subject meant for another section/group
   if (s.kind === "elective") return (p.electives || []).includes(s.id);
   return !(p.hidden || []).includes(s.id);
 }
@@ -411,7 +412,7 @@ function pageSubject() {
   else if (subTab === "notes") body = notesBody(s);
   else if (subTab === "files") body = filesView(files, s.id);
   else {
-    const mineK = kindsFor(s.id), forAll = S.user.is_super || (s.owner_id && s.owner_id === S.user.id);
+    const mineK = kindsFor(s.id), forAll = (s.owner_id && s.owner_id === S.user.id) || (!s.owner_id && S.user.is_admin && canManage(s));
     const ck = customKindsFor(s.id);
     body = `<div class="card"><h3>Which assessments apply to ${esc(s.short)}?</h3>
       <p class="muted small" style="margin-top:-6px">Untick ones your faculty isn't taking, and add your own if ${esc(s.short)} has different ones (like Internal / External). Ticks only affect your view.</p>
@@ -419,7 +420,7 @@ function pageSubject() {
         ${ck.map((x) => `<span class="kc-custom"><label><input type="checkbox" name="c" value="${esc(x.k)}" ${mineK.includes(x.k) ? "checked" : ""}> ${esc(x.label)}${x.all && !s.owner_id ? ' <em class="kc-all">everyone</em>' : ""}</label>${!x.all || forAll ? `<button type="button" class="kc-del" data-ckdel="${esc(x.k)}" data-ckall="${x.all ? 1 : ""}" aria-label="Remove ${esc(x.label)}">✕</button>` : ""}</span>`).join("")}</form>
       <form id="ckF" class="ck-add"><input class="in" name="label" maxlength="24" required placeholder="Add your own, e.g. Internal, External, Mid-term viva">
         ${forAll && !s.owner_id ? `<label class="tcheck"><input type="checkbox" name="all" checked><span>For everyone</span></label>` : ""}<button class="btn primary">+ Add</button></form>
-      ${S.user.is_super && !s.owner_id ? `<div class="kc-admin"><button class="btn sm ghost" id="kDefault">Make my ticked TA/ERLA/PA the default for everyone</button><span class="muted small">Students who haven't customised ${esc(s.short)} will see exactly this set.</span></div>` : ""}
+      ${forAll && !s.owner_id ? `<div class="kc-admin"><button class="btn sm ghost" id="kDefault">Make my ticked TA/ERLA/PA the default for everyone</button><span class="muted small">Students who haven't customised ${esc(s.short)} will see exactly this set.</span></div>` : ""}
     </div>`;
   }
   const ex = examsFor(s.id).filter((e) => e.exam_date || e.slot);
@@ -1026,8 +1027,8 @@ function pageExams() {
 
 function pageSettings() {
   const p = prefs(), hidden = new Set(p.hidden || []), el = new Set(p.electives || []);
-  const defaults = S.subjects.filter((s) => !s.owner_id && s.kind !== "elective");
-  const electives = S.subjects.filter((s) => s.kind === "elective");
+  const defaults = S.subjects.filter((s) => !s.owner_id && s.kind !== "elective" && forMe(s));
+  const electives = S.subjects.filter((s) => s.kind === "elective" && forMe(s));
   const custom = S.subjects.filter((s) => s.owner_id);
   return `<h1 class="page">Subjects &amp; settings</h1><p class="sub">Everything here only changes your own view.</p>
   <div class="grid g2">
@@ -1060,6 +1061,24 @@ function pageSettings() {
 }
 
 const dlKindOpts = (sid) => { const s = subjById(sid); return [...S.kinds, ...(s?.custom_kinds || []).map((x) => x.k)].map((k) => `<option value="${esc(k)}">${esc(kindLabel(k, sid))}</option>`).join(""); };
+const SUBJ_KINDS = [["theory", "Theory"], ["practical", "Practical / lab"], ["project", "Project (no exam)"], ["seminar", "Seminar"], ["training", "Training"], ["elective", "Elective (students opt in)"], ["minor", "Minor"]];
+const kindsSummary = (x) => { const std = Array.isArray(x.default_kinds) ? x.default_kinds : S.kinds; const c = (x.custom_kinds || []).map((k) => k.label); return [std.length === S.kinds.length ? "TA/ERLA/PA" : std.map((k) => KIND_LABEL[k]).join(", "), ...c].filter(Boolean).join(" + ") || "no assessments"; };
+function subjectForm(x) {
+  const edit = !!x; x = x || {};
+  return [
+    { name: "name", label: "Full name", value: x.name || "", required: true },
+    { name: "short", label: "Short name (shown on cards)", value: x.short || "" },
+    { html: `<div class="sg2"><label class="f"><span>Type</span><select class="in" name="kind">${SUBJ_KINDS.map(([k, l]) => `<option value="${k}" ${k === (x.kind || "theory") ? "selected" : ""}>${l}</option>`).join("")}</select></label>
+      <label class="f"><span>Course code</span><input class="in" name="code" value="${esc(x.code || "")}"></label></div>` },
+    { html: targetField(tgtVal(x), "Who studies it?") },
+    ...(edit ? [] : [
+      { name: "assess", label: "Assessments", type: "select", value: "std", options: [["std", "Standard: TA 1–5, ERLA 1–2, PA"], ["custom", "Custom only (no TA/ERLA/PA)"]] },
+      { name: "custom", label: "Custom assessment types (comma separated, optional)", value: "", placeholder: "e.g. Project  or  Internal, External" },
+    ]),
+    { name: "credits", label: "Credits", value: x.credits ?? "" },
+    { name: "color", label: "Colour", type: "color", value: x.color || "#0ea5e9" },
+  ];
+}
 const canManage = (x) => S.user.is_super || (S.user.is_admin && !S.user.admin_scope) || (!!S.user.admin_scope && x?.target_section === S.user.admin_scope);
 let ADMINS = null, adminsLoading = false;
 async function loadAdmins() {
@@ -1136,7 +1155,9 @@ function pageAdmin() {
   </div>
   <div class="card" style="margin-top:14px"><h3>👥 Accounts</h3><div id="usersBox"><button class="btn ghost" id="loadUsers">Load list</button></div></div>
   <div class="card" style="margin-top:14px"><h3>✦ Posted ${sup ? "updates" : "announcements"}</h3><div class="list">${upds.map((u) => `<div class="li"><div style="flex:1;min-width:0"><b>${u.version ? esc(u.version) + " · " : ""}${esc(u.title)}</b> ${u.kind === "release" ? "" : secTag(u, true)}<div class="muted small">${u.kind}${u.author_roll && u.author_roll !== S.user.roll_no ? " · by " + esc(u.author_roll) : ""} · ${fmtStamp(u.created_at)}</div></div>${canManage(u) ? `<button class="btn sm ghost" data-edit-upd="${u.id}">Edit</button> <button class="btn sm danger" data-del-upd="${u.id}">✕</button>` : ""}</div>`).join("") || `<div class="empty">Nothing posted yet.</div>`}</div></div>
-  ${sup ? `<div class="card" style="margin-top:14px"><h3>📚 Subjects (shown to everyone)</h3><div class="list">${S.subjects.filter((s) => !s.owner_id).map((s) => `<div class="li"><span class="dot" style="--c:${s.color}"></span><div style="flex:1;min-width:0"><b>${esc(s.short)}</b> — ${esc(s.name)}<div class="muted small">${esc(s.code || "no code")}${s.credits ? " · " + s.credits + " credits" : ""} · ${s.kind}</div></div><button class="btn sm ghost" data-edit-sub="${s.id}">Edit</button></div>`).join("")}</div></div>` : ""}`;
+  <div class="card" style="margin-top:14px"><h3>📚 Subjects <button class="btn sm primary" id="addSub" style="margin-left:auto">+ Add subject</button></h3>
+    <p class="muted small" style="margin-top:-6px">${sup ? "Subjects everyone or a section studies." : `Subjects for Section ${esc(scope || "")}. Students only see subjects meant for their section/group.`} For a subject with no exam (like a project), add it with custom assessments only.</p>
+    <div class="list">${S.subjects.filter((x) => !x.owner_id && (sup || canManage(x))).map((x) => `<div class="li"><span class="dot" style="--c:${x.color}"></span><div style="flex:1;min-width:0"><b>${esc(x.short)}</b> — ${esc(x.name)} ${secTag(x, true)}<div class="muted small">${esc(x.code || "no code")}${x.credits ? " · " + x.credits + " credits" : ""} · ${esc(x.kind)} · ${kindsSummary(x)}</div></div><button class="btn sm ghost" data-edit-sub="${x.id}">Edit</button>${canManage(x) ? ` <button class="btn sm danger" data-del-sub="${x.id}" title="Delete">✕</button>` : ""}</div>`).join("") || `<div class="empty">No subjects for your section yet.</div>`}</div></div>`;
 }
 function examModal(e) {
   const subs = S.subjects.filter((s) => !s.owner_id);
@@ -1171,7 +1192,7 @@ function formModal(title, fields, onSave, extra = "") {
     ${f.type === "checkbox" ? `<input type="checkbox" name="${f.name}" ${f.value ? "checked" : ""}><span>${esc(f.label)}</span>`
       : `<span>${esc(f.label)}</span>${f.type === "select" ? `<select class="in" name="${f.name}">${f.options.map(([v, l]) => `<option value="${esc(v)}" ${String(v) === String(f.value) ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>`
       : f.type === "textarea" ? `<textarea class="in" name="${f.name}" rows="${f.rows || 4}">${esc(f.value ?? "")}</textarea>`
-      : `<input class="in" name="${f.name}" type="${f.type || "text"}" value="${esc(f.value ?? "")}" ${f.required ? "required" : ""}>`}`}</label>`).join("")}
+      : `<input class="in" name="${f.name}" type="${f.type || "text"}" value="${esc(f.value ?? "")}" ${f.required ? "required" : ""} ${f.placeholder ? `placeholder="${esc(f.placeholder)}"` : ""}>`}`}</label>`).join("")}
     ${extra}<div class="row wrap" style="margin-top:6px"><button class="btn primary">Save</button><button type="button" class="btn ghost" data-close>Cancel</button></div></form>`;
   document.body.appendChild(bg);
   wireSecGrp(bg);
@@ -1507,15 +1528,20 @@ function wirePage() {
       S.updates = S.updates.map((x) => (x.id === u.id ? r.update : x)); render(); toast("Updated");
     });
   }));
+  const addSub = document.getElementById("addSub");
+  if (addSub) addSub.onclick = () => formModal("Add a subject", subjectForm(null), async (fd) => {
+    const custom = String(fd.custom || "").split(",").map((t) => t.trim()).filter(Boolean).map((label) => ({ label }));
+    const r = await api("POST", "admin/subject", { ...fd, standard: fd.assess !== "custom", custom_kinds: custom });
+    S.subjects.push({ ...r.subject, has_notes: false }); render(); toast(`${r.subject.short} added${r.subject.target_section ? " for " + secLabel(r.subject.target_section, r.subject.target_group) : " for everyone"}`);
+  });
+  on("[data-del-sub]", (b) => (b.onclick = async () => {
+    const x = subjById(b.dataset.delSub);
+    if (!confirm(`Delete ${x.short} for everyone? This also removes everyone's ticks, deadlines and notes for it. This can't be undone.`)) return;
+    try { await api("DELETE", `admin/subject/${x.id}`); S.subjects = S.subjects.filter((y) => y.id !== x.id); render(); toast("Subject deleted"); } catch (e) { toast(e.message, true); }
+  }));
   on("[data-edit-sub]", (b) => (b.onclick = () => {
     const s = subjById(b.dataset.editSub);
-    formModal(`Edit subject · ${s.short}`, [
-      { name: "name", label: "Full name", value: s.name, required: true },
-      { name: "short", label: "Short name", value: s.short },
-      { name: "code", label: "Course code", value: s.code || "" },
-      { name: "credits", label: "Credits", value: s.credits ?? "" },
-      { name: "color", label: "Colour", type: "color", value: s.color || "#6366f1" },
-    ], async (fd) => {
+    formModal(`Edit subject · ${s.short}`, subjectForm(s), async (fd) => {
       const r = await api("PUT", `subject/${s.id}`, fd);
       S.subjects = S.subjects.map((x) => (x.id === s.id ? { ...x, ...r.subject } : x)); render(); toast("Subject updated");
     });
