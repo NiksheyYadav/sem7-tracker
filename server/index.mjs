@@ -196,6 +196,9 @@ async function needAdmin(req) {
   if (!u.is_admin) throw new HttpError(403, "Admins only");
   return u;
 }
+// a date (YYYY-MM-DD) that is already over in India — never announce/push those as "scheduled"/"due"
+const todayIST = () => new Date(Date.now() + 5.5 * 3600e3).toISOString().slice(0, 10);
+const isPast = (d) => !!d && String(d).slice(0, 10) < todayIST();
 const fmtD = (iso) => new Date(iso + "T00:00:00Z").toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "short", timeZone: "UTC" });
 // one-line user text: strip control chars / zero-width / bidi tricks, collapse spaces, cap length (by characters, emoji-safe)
 const MIME = { pdf: "application/pdf", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", svg: "image/svg+xml",
@@ -698,7 +701,7 @@ const routes = {
     const t = b.batch ? cleanTarget(b, u) : {};
     const rows = await q("insert into events (user_id, subject_id, title, event_date, event_time, note, color, target_section, target_group) values ($1,$2,$3,$4,$5,$6,$7,$8,$9) returning *",
       [b.batch ? null : u.id, ev.subject_id, ev.title, ev.event_date, ev.event_time, ev.note, ev.color, t.s || null, t.g || null]);
-    if (b.batch) await announce(`New: ${ev.title}`, `${fmtD(ev.event_date)}${ev.event_time ? " · " + ev.event_time : ""}${ev.note ? "\n" + ev.note : ""}`, b.notify !== false, "/#/calendar", t, u.roll_no);
+    if (b.batch && !isPast(ev.event_date)) await announce(`New: ${ev.title}`, `${fmtD(ev.event_date)}${ev.event_time ? " · " + ev.event_time : ""}${ev.note ? "\n" + ev.note : ""}`, b.notify !== false, "/#/calendar", t, u.roll_no);
     return json({ event: rows[0] });
   },
   "PUT event": async ({ req, body: b }, id) => {
@@ -710,7 +713,7 @@ const routes = {
     const t = cur.user_id ? {} : cleanTarget(b, u);
     const rows = await q("update events set subject_id=$1, title=$2, event_date=$3, event_time=$4, note=$5, color=$6, target_section=$8, target_group=$9, updated_at=now() where id=$7 returning *",
       [ev.subject_id, ev.title, ev.event_date, ev.event_time, ev.note, ev.color, id, t.s || null, t.g || null]);
-    if (!cur.user_id && b.notify) await announce(`Updated: ${ev.title}`, `${fmtD(ev.event_date)}${ev.event_time ? " · " + ev.event_time : ""}`, true, "/#/calendar", t, u.roll_no);
+    if (!cur.user_id && b.notify && !isPast(ev.event_date)) await announce(`Updated: ${ev.title}`, `${fmtD(ev.event_date)}${ev.event_time ? " · " + ev.event_time : ""}`, true, "/#/calendar", t, u.roll_no);
     return json({ event: rows[0] });
   },
   "DELETE event": async ({ req }, id) => {
@@ -747,7 +750,7 @@ const routes = {
     const ex = cleanExam(b), t = cleanTarget(b, u);
     const rows = await q("insert into exams (subject_id, name, exam_date, slot, note, target_section, target_group) values ($1,$2,$3,$4,$5,$6,$7) returning *", [ex.subject_id, ex.name, ex.exam_date, ex.slot, ex.note, t.s, t.g]);
     const s = (await q("select short from subjects where id=$1", [ex.subject_id]))[0];
-    await announce(`${s?.short || ""} ${ex.name} scheduled`, `${ex.exam_date ? fmtD(ex.exam_date) : "Date TBA"}${ex.slot ? " · " + ex.slot : ""}`, b.notify !== false, "/#/exams", t, u.roll_no);
+    if (!isPast(ex.exam_date)) await announce(`${s?.short || ""} ${ex.name} scheduled`, `${ex.exam_date ? fmtD(ex.exam_date) : "Date TBA"}${ex.slot ? " · " + ex.slot : ""}`, b.notify !== false, "/#/exams", t, u.roll_no);
     return json({ exam: rows[0] });
   },
   "PUT exam": async ({ req, body: b }, id) => {
@@ -756,7 +759,7 @@ const routes = {
     if (!cur || !canManage(u, cur)) throw new HttpError(403, "You can only edit your section's assessments");
     const ex = cleanExam(b), t = cleanTarget(b, u);
     const rows = await q("update exams set subject_id=$1, name=$2, exam_date=$3, slot=$4, note=$5, target_section=$7, target_group=$8, updated_at=now() where id=$6 returning *", [ex.subject_id, ex.name, ex.exam_date, ex.slot, ex.note, id, t.s, t.g]);
-    if (b.notify) {
+    if (b.notify && !isPast(ex.exam_date)) {
       const s = (await q("select short from subjects where id=$1", [ex.subject_id]))[0];
       await announce(`${s?.short || ""} ${ex.name} updated`, `${ex.exam_date ? fmtD(ex.exam_date) : "Date TBA"}${ex.slot ? " · " + ex.slot : ""}`, true, "/#/exams", t, u.roll_no);
     }
@@ -866,7 +869,7 @@ const routes = {
       on conflict (subject_id, kind, (coalesce(target_section,'')), (coalesce(target_group,''))) do update set due_date=excluded.due_date, note=excluded.note, updated_at=now() returning *`,
       [b.subject_id, b.kind, dateOrNull(b.due_date), str(b.note, 300), t.s, t.g]);
     const sj = (await q("select short, custom_kinds from subjects where id=$1", [b.subject_id]))[0];
-    await announce(`${sj?.short || ""} ${kindLabelOf(b.kind, sj)}: ${b.due_date ? "due " + fmtD(b.due_date) : "update"}`, str(b.note, 300) || "", b.notify !== false, "/#/subject/" + b.subject_id, t, u.roll_no);
+    if (!isPast(b.due_date)) await announce(`${sj?.short || ""} ${kindLabelOf(b.kind, sj)}: ${b.due_date ? "due " + fmtD(b.due_date) : "update"}`, str(b.note, 300) || "", b.notify !== false, "/#/subject/" + b.subject_id, t, u.roll_no);
     return json({ deadline: rows[0] });
   },
   "POST admin/reset": async ({ req, body: b }) => {

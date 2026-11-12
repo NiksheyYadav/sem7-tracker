@@ -210,7 +210,7 @@ const TYPE_META = {
 function reminders() {
   return datedItems().filter((x) => { const n = daysUntil(x.date); return x.type === "exam" ? n >= 0 && n <= 7 : n >= -7 && n <= 3; });
 }
-function unreadUpdates() { const seen = prefs().notifSeen || S.user.created_at; return myUpdates().filter((u) => u.created_at > seen); }
+function unreadUpdates() { const seen = prefs().notifSeen || S.user.created_at; return myUpdates().filter((u) => u.kind !== "release" && u.created_at > seen); }
 function badgeCount() { return unreadUpdates().length + reminders().filter((x) => daysUntil(x.date) <= 1).length; }
 
 async function savePrefs(patch) {
@@ -971,7 +971,8 @@ function pushState() {
 let notifAll = false;
 function pageNotifications() {
   const seenBefore = prefs().notifSeen || S.user.created_at;
-  const feed = notifAll ? S.updates : myUpdates();
+  const feed = (notifAll ? S.updates : myUpdates()).filter((u) => u.kind !== "release");
+  const latestRel = S.updates.find((u) => u.kind === "release");
   const rem = reminders();
   const st = pushState();
   const pushCard = {
@@ -989,12 +990,14 @@ function pageNotifications() {
     <div class="card"><h3>⏰ Reminders</h3>
       ${groups.length ? groups.map(([g, l]) => `<div class="grp"><div class="grp-h">${g}</div><div class="list">${l.map((x) => itemRow(x)).join("")}</div></div>`).join("") : `<div class="empty">Nothing due in the next few days 🎉</div>`}
     </div>
-    <div class="card"><h3>📣 Announcements &amp; updates${S.user.is_admin ? `<button class="btn sm ghost" id="notifAll" style="margin-left:auto">${notifAll ? "Only mine" : "All sections"}</button>` : ""}</h3>
+    <div class="card"><h3>📣 Announcements${S.user.is_admin ? `<button class="btn sm ghost" id="notifAll" style="margin-left:auto">${notifAll ? "Only mine" : "All sections"}</button>` : ""}</h3>
       ${S.user.section ? `<p class="muted small" style="margin-top:-6px">Showing posts for everyone + ${esc(secLabel(S.user.section, S.user.grp))}${notifAll ? " — and every other section (admin view)" : ""}.</p>` : `<p class="muted small" style="margin-top:-6px">Set your section in <a href="#/settings">Settings</a> to also see section-only posts.</p>`}
       ${feed.length ? `<div class="list">${feed.slice(0, 40).map((u) => `<div class="li ann ${u.created_at > seenBefore ? "unread" : ""}">
-        <span class="ann-ic">${u.kind === "release" ? "✦" : u.kind === "alert" ? "📌" : "📣"}</span>
+        <span class="ann-ic">${u.kind === "alert" ? "📌" : "📣"}</span>
         <div style="flex:1;min-width:0"><div style="font-weight:700">${u.version ? `<span class="pill brand">${esc(u.version)}</span> ` : ""}${secTag(u, notifAll && u.kind !== "release")} ${esc(u.title)}</div>
-          ${u.body ? `<div class="muted small ann-body">${md(u.body)}</div>` : ""}<div class="muted small">${fmtStamp(u.created_at)}</div></div></div>`).join("")}</div>` : `<div class="empty">No announcements yet.</div>`}
+          ${u.body ? `<div class="muted small ann-body">${md(u.body)}</div>` : ""}<div class="muted small">${fmtStamp(u.created_at)}${S.user.is_admin && u.author_roll && u.author_roll !== S.user.roll_no ? " · by " + esc(u.author_roll) : ""}</div></div>
+        ${S.user.is_admin && canManage(u) ? `<div class="ann-act"><button class="btn sm ghost" data-edit-upd="${u.id}" title="Edit">✎</button><button class="btn sm danger" data-del-upd="${u.id}" title="Delete">✕</button></div>` : ""}</div>`).join("")}</div>` : `<div class="empty">No announcements yet.</div>`}
+      ${latestRel ? `<a class="rel-link" href="#/updates">✦ App updates live in the <b>Update log</b>${latestRel.version ? ` · latest ${esc(latestRel.version)}` : ""} →</a>` : ""}
     </div>
   </div>`;
 }
@@ -1003,7 +1006,7 @@ function pageUpdates() {
   const rel = S.updates.filter((u) => u.kind === "release");
   return `<h1 class="page">Update log</h1><p class="sub">What's new in Sem 7 Tracker, newest first.</p>
   <div class="timeline">${rel.map((u, i) => `<div class="card tl-item ${i === 0 ? "latest" : ""}">
-    <div class="row between wrap"><div class="row">${u.version ? `<span class="pill brand">${esc(u.version)}</span>` : ""}<b>${esc(u.title)}</b>${i === 0 ? '<span class="pill green">Latest</span>' : ""}</div><span class="muted small">${fmtStamp(u.created_at)}</span></div>
+    <div class="row between wrap"><div class="row">${u.version ? `<span class="pill brand">${esc(u.version)}</span>` : ""}<b>${esc(u.title)}</b>${i === 0 ? '<span class="pill green">Latest</span>' : ""}</div><span class="muted small">${fmtStamp(u.created_at)}${S.user.is_super ? ` <button class="btn sm ghost" data-edit-upd="${u.id}" title="Edit">✎</button><button class="btn sm danger" data-del-upd="${u.id}" title="Delete">✕</button>` : ""}</span></div>
     ${u.body ? `<div class="md small-md">${md(u.body)}</div>` : ""}</div>`).join("") || `<div class="card empty">No updates yet.</div>`}</div>`;
 }
 
@@ -1013,8 +1016,8 @@ function pageExams() {
   const table = (list) => `<div class="scroll"><table class="t"><thead><tr><th>Date</th><th>Shift / time</th><th>Subject</th><th>Countdown</th></tr></thead><tbody>
     ${list.map((e) => { const s = subjById(e.subject_id); return `<tr style="${isVisible(s) ? "" : "opacity:.45"}"><td style="white-space:nowrap"><b>${e.exam_date ? fmtDate(e.exam_date) : "TBA"}</b></td><td>${esc(e.slot || "—")}</td>
       <td><span class="row" style="gap:7px"><span class="dot" style="--c:${s?.color}"></span><span>${esc(s?.name)}${s?.code ? ` <span class="muted small">${esc(s.code)}</span>` : ""}${s?.kind === "elective" ? ' <span class="pill">elective</span>' : ""} ${secTag(e)}${e.note ? `<div class="muted small">${esc(e.note)}</div>` : ""}</span></span></td>
-      <td>${e.exam_date ? dueLabel(e.exam_date) : ""}</td></tr>`; }).join("")}</tbody></table></div>`;
-  return `<h1 class="page">Unit assessments</h1><p class="sub">Theory exams for B.Tech CSE 7th semester · ${EXAM_VENUE}. There are three unit assessments; UA-1 and UA-2 dates for most subjects will be added once available.</p>
+      <td>${e.exam_date ? (daysUntil(e.exam_date) < 0 ? '<span class="pill green">Done ✓</span>' : dueLabel(e.exam_date)) : ""}</td></tr>`; }).join("")}</tbody></table></div>`;
+  return `<h1 class="page">Unit assessments</h1><p class="sub">Theory exams for B.Tech CSE 7th semester · ${EXAM_VENUE}. There are three unit assessments; UA-1 dates will be added once available.</p>
   ${names.map((n) => `<div class="card" style="margin-bottom:14px"><h3>${n === "UA-3" ? "Unit Assessment-3 · Dec 2026" : n === "UA-2" ? "Unit Assessment-2" : n === "UA-1" ? "Unit Assessment-1" : esc(n)}</h3>
     ${n === "UA-3" ? `<p class="muted small" style="margin-top:-6px">Morning 10:00–11:30 · Afternoon 1:30–3:00 · from the official date sheet (06/11/2026).</p>` : ""}
     ${table(all.filter((e) => e.name === n))}</div>`).join("")}

@@ -595,3 +595,6 @@ a.autolink:hover { background: color-mix(in srgb, var(--brand) 18%, transparent)
 .ck-add .tcheck{padding:0;white-space:nowrap}
 .kc-admin{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:12px}
 .kc-custom:has(input:checked) .kc-del{border-color:var(--brand)}
+.ann-act{display:flex;gap:4px;flex:none;align-self:flex-start}
+.rel-link{display:block;margin-top:12px;padding:9px 12px;border-radius:12px;border:1px dashed var(--line);font-size:13px;color:inherit;text-decoration:none}
+.rel-link:hover{border-color:var(--brand)}
