@@ -828,7 +828,10 @@ function pageCalendar() {
         ${sel.length ? `<div class="list">${sel.map((x) => `<div class="li">
             <span class="dot" style="--c:${x.color || x.s?.color || "#64748b"}"></span>
             <div style="flex:1;min-width:0"><div style="font-weight:700">${esc(x.title)}</div><div class="muted small">${TYPE_META[x.type][0]}${x.time ? " · " + esc(x.time) : ""} ${secTag(x.tg)}${x.note ? " · " + linkify(x.note) : ""}</div></div>
-            ${x.ev && (x.ev.user_id || canManage(x.ev)) ? `<button class="btn sm ghost" data-edit-ev="${x.ev.id}">Edit</button>` : x.href ? `<a class="btn sm ghost" href="${x.href}">Open</a>` : ""}
+            ${x.ev && (x.ev.user_id || canManage(x.ev)) ? `<button class="btn sm ghost" data-edit-ev="${x.ev.id}">Edit</button>`
+              : S.user.is_admin && x.type === "deadline" && x.tg && canManage(x.tg) ? `<button class="btn sm ghost" data-edit-dl="${x.tg.id}">Edit</button>`
+              : S.user.is_admin && x.type === "exam" && x.tg && canManage(x.tg) ? `<button class="btn sm ghost" data-edit-ex="${x.tg.id}">Edit</button>`
+              : x.href ? `<a class="btn sm ghost" href="${x.href}">Open</a>` : ""}
           </div>`).join("")}</div>` : `<div class="empty" style="padding:12px">Nothing on this day.</div>`}
         <form id="evF" style="margin-top:12px;border-top:1px dashed var(--line);padding-top:12px">
           <b class="small">＋ Add event on ${fmtDate(calSel, false)}</b>
@@ -1159,6 +1162,33 @@ function pageAdmin() {
     <p class="muted small" style="margin-top:-6px">${sup ? "Subjects everyone or a section studies." : `Subjects for Section ${esc(scope || "")}. Students only see subjects meant for their section/group.`} For a subject with no exam (like a project), add it with custom assessments only.</p>
     <div class="list">${S.subjects.filter((x) => !x.owner_id && (sup || canManage(x))).map((x) => `<div class="li"><span class="dot" style="--c:${x.color}"></span><div style="flex:1;min-width:0"><b>${esc(x.short)}</b> — ${esc(x.name)} ${secTag(x, true)}<div class="muted small">${esc(x.code || "no code")}${x.credits ? " · " + x.credits + " credits" : ""} · ${esc(x.kind)} · ${kindsSummary(x)}</div></div><button class="btn sm ghost" data-edit-sub="${x.id}">Edit</button>${canManage(x) ? ` <button class="btn sm danger" data-del-sub="${x.id}" title="Delete">✕</button>` : ""}</div>`).join("") || `<div class="empty">No subjects for your section yet.</div>`}</div></div>`;
 }
+// edit a class deadline: subject, assessment type, audience, date, note — or delete it
+function deadlineModal(d) {
+  if (!d) return;
+  const subs = S.subjects.filter((x) => !x.owner_id);
+  const bg = formModal(`Edit deadline · ${subjById(d.subject_id)?.short} ${kindLabel(d.kind, d.subject_id)}`, [
+    { html: `<div class="sg2"><label class="f"><span>Subject</span><select class="in" name="subject_id" data-dlm-sub>${subs.map((x) => `<option value="${x.id}" ${x.id === d.subject_id ? "selected" : ""}>${esc(x.short)}</option>`).join("")}</select></label>
+      <label class="f"><span>Assessment</span><select class="in" name="kind" data-dlm-kind>${dlKindOpts(d.subject_id).replace(`value="${esc(d.kind)}"`, `value="${esc(d.kind)}" selected`)}</select></label></div>` },
+    { html: targetField(tgtVal(d)) },
+    { name: "due_date", label: "Due date", type: "date", value: dOnly(d.due_date) },
+    { name: "note", label: "Note", value: d.note || "" },
+    { name: "notify", label: "Ping their devices about this change", type: "checkbox", value: false },
+  ], async (fd) => {
+    const r = await api("PUT", "deadline", { ...fd, id: d.id, subject_id: Number(fd.subject_id) });
+    S.deadlines = S.deadlines.filter((x) => x.id !== d.id && !(r.deadline && x.id === r.deadline.id));
+    if (r.deadline) S.deadlines.push(r.deadline);
+    await reloadData(); render(); toast("Deadline updated");
+  });
+  const del = document.createElement("button");
+  del.type = "button"; del.className = "btn danger"; del.dataset.dlmDel = "1"; del.textContent = "Delete"; del.style.marginLeft = "auto";
+  bg.querySelector(".modal > .row:last-child")?.appendChild(del);
+  const sub = bg.querySelector("[data-dlm-sub]");
+  sub.onchange = () => (bg.querySelector("[data-dlm-kind]").innerHTML = dlKindOpts(Number(sub.value)));
+  bg.querySelector("[data-dlm-del]").onclick = async () => {
+    if (!confirm(`Delete the ${subjById(d.subject_id)?.short} ${kindLabel(d.kind, d.subject_id)} deadline for ${secLabel(d.target_section, d.target_group)}?`)) return;
+    try { await api("PUT", "deadline", { id: d.id, subject_id: d.subject_id, kind: d.kind, target_section: d.target_section, target_group: d.target_group }); S.deadlines = S.deadlines.filter((x) => x.id !== d.id); bg.remove(); render(); toast("Deadline deleted"); } catch (e) { toast(e.message, true); }
+  };
+}
 function examModal(e) {
   const subs = S.subjects.filter((s) => !s.owner_id);
   const bg = document.createElement("div");
@@ -1207,6 +1237,7 @@ function formModal(title, fields, onSave, extra = "") {
     const btn = e.target.querySelector("button.primary"); btn.disabled = true;
     try { await onSave(fd); close(); } catch (err) { btn.disabled = false; toast(err.message, true); }
   };
+  return bg;
 }
 function wireUsers() {
   document.querySelectorAll("[data-edit-user]").forEach((b) => (b.onclick = () => {
@@ -1499,21 +1530,7 @@ function wirePage() {
     if (!confirm(`Remove the ${subjById(d.subject_id)?.short} ${kindLabel(d.kind, d.subject_id)} deadline for ${secLabel(d.target_section, d.target_group)}?`)) return;
     try { await api("PUT", "deadline", { id: d.id, subject_id: d.subject_id, kind: d.kind, target_section: d.target_section, target_group: d.target_group }); S.deadlines = S.deadlines.filter((x) => x.id !== d.id); render(); } catch (e) { toast(e.message, true); }
   }));
-  on("[data-edit-dl]", (b) => (b.onclick = () => {
-    const d = S.deadlines.find((x) => x.id === Number(b.dataset.editDl)); if (!d) return;
-    const sid = d.subject_id, kind = d.kind;
-    formModal(`Edit deadline · ${subjById(sid)?.short} ${kindLabel(kind, sid)}`, [
-      { html: targetField(tgtVal(d)) },
-      { name: "due_date", label: "Due date", type: "date", value: dOnly(d?.due_date) },
-      { name: "note", label: "Note", value: d?.note || "" },
-      { name: "notify", label: "Ping their devices about this change", type: "checkbox", value: false },
-    ], async (fd) => {
-      const r = await api("PUT", "deadline", { id: d.id, subject_id: sid, kind, ...fd });
-      S.deadlines = S.deadlines.filter((x) => x.id !== d.id && !(r.deadline && x.id === r.deadline.id));
-      if (r.deadline) S.deadlines.push(r.deadline);
-      await refreshUpdates(); render(); toast("Deadline updated");
-    });
-  }));
+  on("[data-edit-dl]", (b) => (b.onclick = (e) => { e.preventDefault(); deadlineModal(S.deadlines.find((x) => x.id === Number(b.dataset.editDl))); }));
   on("[data-edit-upd]", (b) => (b.onclick = () => {
     const u = S.updates.find((x) => x.id === Number(b.dataset.editUpd));
     formModal("Edit announcement / update", [
